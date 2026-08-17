@@ -107,9 +107,9 @@ export const SKILL_SURVEY_CONTENT = `# 文献调研 (literature-survey)
 用户要「看看某课题 / 某人最近发了什么 / 帮我调研一下」，且没有要求写入跟踪方案或定期提醒。
 
 ## 流程
-1. literature_search（先本地库，再 Crossref；需要预印本时说明 arXiv 走跟踪搜索，本技能不建 plan）。
+1. literature_search：query 必填；最近 N 天加 recentDays；已有 ORCID 就带 orcid。不要用 fromYear/toYear 表示最近几天。需要预印本时说明 arXiv 走跟踪搜索，本技能不建 plan。
 2. 需要全文细节时 literature_get（DOI）。
-3. 按相关度综述：最相关几篇各一句，其余可列题名；不确定的标出来，不要假装读过全文。
+3. 按工具返回的条目综述：重点几篇各一句，其余可列题名；不确定的标出来，不要假装读过全文。
 
 ## 不要做
 - 不要 tracking_plan_add / tracking_search / tracking_curate / tracking_log_complete。

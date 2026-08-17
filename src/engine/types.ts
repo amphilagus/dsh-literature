@@ -33,6 +33,11 @@ export interface SearchOptions {
   journal?: string
   openAccess?: boolean
   minCitations?: number
+  /** Restrict Crossref results to this researcher (hyphenated ORCID). */
+  orcid?: string
+  /** Keep only papers whose publicationDate falls in the last N days. */
+  recentDays?: number
+  /** Internal/local-only sort. Crossref sort is inferred from `orcid`, not this field. */
   sortBy?: 'relevance' | 'date'
   /** Store remote hits into the local database; defaults to the service config. */
   cacheRemote?: boolean
@@ -52,7 +57,7 @@ export interface SearchOutcome {
 /** Failed search outcome. */
 export interface SearchFailure {
   ok: false
-  code: 'invalid_query' | 'internal_error'
+  code: 'invalid_query' | 'invalid_orcid' | 'internal_error'
   message: string
 }
 

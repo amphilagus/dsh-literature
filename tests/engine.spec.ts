@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { LiteratureDatabase } from '../src/db/database.ts'
 import { LiteratureSearchEngine, toHit } from '../src/engine/engine.ts'
-import type { CrossrefSearchApi, CrossrefWork } from '../src/engine/crossref.ts'
+import type { CrossrefSearchApi, CrossrefWork, SearchWorksParams } from '../src/engine/crossref.ts'
 
 const work = (overrides: Partial<Omit<CrossrefWork, 'title'>> & { DOI: string; title: string }): CrossrefWork => {
   const { title, ...rest } = overrides
@@ -133,6 +133,131 @@ describe('LiteratureSearchEngine', () => {
     const result = await engine.search('er', { sortBy: 'date', sources: 'local' })
     if (!result.ok) throw new Error('expected success')
     expect(result.papers.map(paper => paper.year)).toEqual([2024, 2019])
+  })
+
+  it('does not send Crossref sort=published without an orcid, even if sortBy=date', async () => {
+    let captured: SearchWorksParams | undefined
+    const capturing: CrossrefSearchApi = {
+      async searchWorks(params) {
+        captured = params
+        return { works: [], total: 0 }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const engine = useEngine(capturing)
+    const result = await engine.search('quantum', { sortBy: 'date', sources: 'crossref' })
+    if (!result.ok) throw new Error('expected success')
+    expect(captured?.sort).toBe('relevance')
+    expect(captured?.order).toBeUndefined()
+  })
+
+  it('sends Crossref sort=published and an orcid filter when orcid is set', async () => {
+    let captured: SearchWorksParams | undefined
+    const capturing: CrossrefSearchApi = {
+      async searchWorks(params) {
+        captured = params
+        return { works: [], total: 0 }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const engine = useEngine(capturing)
+    const result = await engine.search('Sand', {
+      sources: 'crossref',
+      orcid: '0000-0002-9019-5088',
+    })
+    if (!result.ok) throw new Error('expected success')
+    expect(captured?.sort).toBe('published')
+    expect(captured?.order).toBe('desc')
+    expect(captured?.filter).toContain('orcid:0000-0002-9019-5088')
+    expect(captured?.filter).not.toContain('from-pub-date')
+  })
+
+  it('forwards recentDays as from-pub-date when orcid is set', async () => {
+    let captured: SearchWorksParams | undefined
+    const capturing: CrossrefSearchApi = {
+      async searchWorks(params) {
+        captured = params
+        return { works: [], total: 0 }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const engine = useEngine(capturing)
+    const result = await engine.search('Sand', {
+      sources: 'crossref',
+      orcid: '0000-0002-9019-5088',
+      recentDays: 7,
+    })
+    if (!result.ok) throw new Error('expected success')
+    expect(captured?.sort).toBe('published')
+    expect(captured?.filter).toContain('orcid:0000-0002-9019-5088')
+    expect(captured?.filter).toMatch(/from-pub-date:\d{4}-\d{2}-\d{2}/)
+    expect(captured?.filter).toMatch(/until-pub-date:\d{4}-\d{2}-\d{2}/)
+  })
+
+  it('crops topic recentDays hits locally without sending Crossref date filters', async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const [year, month, day] = today.split('-').map(Number)
+    let captured: SearchWorksParams | undefined
+    const capturing: CrossrefSearchApi = {
+      async searchWorks(params) {
+        captured = params
+        return {
+          works: [
+            work({ DOI: '10.1000/old', title: 'Old hit', published: { 'date-parts': [[2019, 1, 1]] } }),
+            work({ DOI: '10.1000/new', title: 'New hit', published: { 'date-parts': [[year, month, day]] } }),
+            work({ DOI: '10.1000/undated', title: 'No date' }),
+          ],
+          total: 3,
+        }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const engine = useEngine(capturing)
+    const result = await engine.search('crispr', { sources: 'crossref', recentDays: 7, limit: 20 })
+    if (!result.ok) throw new Error('expected success')
+    expect(captured?.sort).toBe('relevance')
+    expect(captured?.filter).not.toContain('from-pub-date')
+    expect(captured?.filter).not.toContain('until-pub-date')
+    expect(captured?.filter).toMatch(/from-created-date:\d{4}-\d{2}-\d{2}/)
+    expect(captured?.rows).toBe(100)
+    expect(result.papers.map(paper => paper.doi)).toEqual(['10.1000/new'])
+  })
+
+  it('keeps topic recentDays papers whose year-month overlaps the window', async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const [year, month] = today.slice(0, 7).split('-').map(Number)
+    const capturing: CrossrefSearchApi = {
+      async searchWorks() {
+        return {
+          works: [
+            work({ DOI: '10.1000/month', title: 'Month precision', published: { 'date-parts': [[year, month]] } }),
+            work({ DOI: '10.1000/old', title: 'Old month', published: { 'date-parts': [[2019, 1]] } }),
+          ],
+          total: 2,
+        }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const engine = useEngine(capturing)
+    const result = await engine.search('crispr', { sources: 'crossref', recentDays: 7 })
+    if (!result.ok) throw new Error('expected success')
+    expect(result.papers.map(paper => paper.doi)).toEqual(['10.1000/month'])
+  })
+
+  it('rejects a malformed orcid', async () => {
+    const engine = useEngine(stubCrossref([]))
+    const result = await engine.search('name', { orcid: 'not-an-orcid', sources: 'crossref' })
+    expect(result).toMatchObject({ ok: false, code: 'invalid_orcid' })
   })
 
   it('looks up DOIs local-first, then Crossref with caching', async () => {

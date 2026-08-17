@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { LiteratureDatabase } from '../src/db/database.ts'
-import { normalizeCandidateId } from '../src/engine/tracking-engine.ts'
+import type { ArxivSearchApi } from '../src/engine/arxiv.ts'
+import type { CrossrefSearchApi, CrossrefWork, SearchWorksParams } from '../src/engine/crossref.ts'
+import { normalizeCandidateId, TrackingSearchEngine } from '../src/engine/tracking-engine.ts'
 
 const cleanups: (() => void)[] = []
 const tmpDb = (): string => {
@@ -130,5 +132,80 @@ describe('candidate id normalization', () => {
     expect(normalizeCandidateId('2607.01016v2')).toBe('arxiv:2607.01016')
     expect(normalizeCandidateId('https://arxiv.org/abs/2607.01016')).toBe('arxiv:2607.01016')
     expect(normalizeCandidateId('nonsense')).toBeNull()
+  })
+})
+
+const work = (overrides: Partial<Omit<CrossrefWork, 'title'>> & { DOI: string; title: string }): CrossrefWork => {
+  const { title, ...rest } = overrides
+  return { 'is-referenced-by-count': 0, title: [title], ...rest }
+}
+
+const emptyArxiv: ArxivSearchApi = {
+  async search() {
+    return []
+  },
+}
+
+describe('tracking Crossref search paths', () => {
+  it('uses relevance and crops topic hits locally without a Crossref date filter', async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const [year, month, day] = today.split('-').map(Number)
+    let captured: SearchWorksParams | undefined
+    const crossref: CrossrefSearchApi = {
+      async searchWorks(params) {
+        captured = params
+        return {
+          works: [
+            work({ DOI: '10.1000/old', title: 'Old topic', published: { 'date-parts': [[2019, 1, 1]] } }),
+            work({ DOI: '10.1000/new', title: 'New topic', published: { 'date-parts': [[year, month, day]] } }),
+          ],
+          total: 2,
+        }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const db = seededDb()
+    db.upsertTrackingPlan({ id: 'plan-topic', name: 'crispr', kind: 'topic', time_window_days: 7 })
+    const plan = db.getTrackingPlan('plan-topic')
+    if (plan === null) throw new Error('expected plan')
+    const engine = new TrackingSearchEngine(db, crossref, emptyArxiv, { cacheRemote: false })
+    const outcome = await engine.searchPlan(plan)
+    expect(captured?.sort).toBe('relevance')
+    expect(captured?.filter).toBeUndefined()
+    expect(outcome.candidates.map(candidate => candidate.unique_id)).toEqual(['10.1000/new'])
+    db.close()
+  })
+
+  it('keeps person searches on Crossref published + orcid + date window', async () => {
+    let captured: SearchWorksParams | undefined
+    const crossref: CrossrefSearchApi = {
+      async searchWorks(params) {
+        captured = params
+        return { works: [], total: 0 }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const db = seededDb()
+    db.upsertTrackingPlan({
+      id: 'plan-person',
+      name: 'Andrea Sand',
+      kind: 'person',
+      orcid: '0000-0001-9041-1468',
+      time_window_days: 30,
+    })
+    const plan = db.getTrackingPlan('plan-person')
+    if (plan === null) throw new Error('expected plan')
+    const engine = new TrackingSearchEngine(db, crossref, emptyArxiv, { cacheRemote: false })
+    await engine.searchPlan(plan)
+    expect(captured?.sort).toBe('published')
+    expect(captured?.order).toBe('desc')
+    expect(captured?.filter).toContain('orcid:0000-0001-9041-1468')
+    expect(captured?.filter).toMatch(/from-pub-date:\d{4}-\d{2}-\d{2}/)
+    expect(captured?.filter).toMatch(/until-pub-date:\d{4}-\d{2}-\d{2}/)
+    db.close()
   })
 })

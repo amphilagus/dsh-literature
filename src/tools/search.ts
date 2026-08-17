@@ -17,9 +17,9 @@ export const LITERATURE_SEARCH_TOOL_NAME = 'literature_search'
 const SEARCH_DESCRIPTION =
   'Search scientific literature for research papers. Queries run against the local literature database '
   + '(full-text search over title/abstract/journal/authors, filled by previous searches and imports) and '
-  + 'the Crossref scholarly API, merged and deduplicated by DOI. Use this to find papers on a research '
-  + 'topic, filter by year range, journal, open access, or citation count, and follow up with '
-  + 'literature_get to fetch full details for a specific DOI.'
+  + 'the Crossref scholarly API, merged and deduplicated by DOI. Optional orcid restricts results to one '
+  + 'researcher; optional recentDays keeps only papers from the last N days. Use fromYear/toYear for a '
+  + 'calendar-year range, not a last-N-days window. Follow up with literature_get for a specific DOI.'
 
 const SEARCH_SUCCESS_SCHEMA = {
   type: 'object',
@@ -80,7 +80,7 @@ export function registerLiteratureSearchTool(ctx: Context, service: LiteratureSe
       query: {
         type: 'string',
         required: true,
-        description: 'Research-topic keywords or a phrase to search for, e.g. "CRISPR off-target detection".',
+        description: 'Search query: topic keywords, a phrase, or a researcher name, e.g. "CRISPR off-target detection".',
       },
       limit: {
         type: 'integer',
@@ -91,15 +91,18 @@ export function registerLiteratureSearchTool(ctx: Context, service: LiteratureSe
         enum: ['local', 'crossref', 'both'],
         description: 'Which backends to consult: the local literature database, the Crossref API, or both. Defaults to "both".',
       },
-      fromYear: { type: 'integer', description: 'Only papers published in this year or later.' },
-      toYear: { type: 'integer', description: 'Only papers published in this year or earlier.' },
+      fromYear: { type: 'integer', description: 'Only papers published in this calendar year or later. Not a last-N-days filter; use recentDays for that.' },
+      toYear: { type: 'integer', description: 'Only papers published in this calendar year or earlier. Not a last-N-days filter; use recentDays for that.' },
       journal: { type: 'string', description: 'Restrict to a journal name (substring match, e.g. "Nature").' },
       openAccess: { type: 'boolean', description: 'Only open-access papers when true.' },
       minCitations: { type: 'integer', description: 'Only papers with at least this many citations.' },
-      sortBy: {
+      orcid: {
         type: 'string',
-        enum: ['relevance', 'date'],
-        description: 'Sort by relevance (default) or by publication date (newest first).',
+        description: 'Optional ORCID (0000-0000-0000-0000) to restrict results to that researcher.',
+      },
+      recentDays: {
+        type: 'integer',
+        description: 'Keep only papers from the last N days. Use this for last-week or last-day windows.',
       },
     },
     output: { schema: SEARCH_OUTPUT_SCHEMA, render: renderSearchValue },
@@ -114,7 +117,8 @@ export function registerLiteratureSearchTool(ctx: Context, service: LiteratureSe
         ...args.journal !== undefined ? { journal: args.journal } : {},
         ...args.openAccess !== undefined ? { openAccess: args.openAccess } : {},
         ...args.minCitations !== undefined ? { minCitations: args.minCitations } : {},
-        ...args.sortBy !== undefined ? { sortBy: args.sortBy } : {},
+        ...args.orcid !== undefined ? { orcid: args.orcid } : {},
+        ...args.recentDays !== undefined ? { recentDays: args.recentDays } : {},
       }
       try {
         return await service.engine.search(args.query, options, exec.signal)

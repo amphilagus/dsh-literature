@@ -8,6 +8,8 @@
 import { LiteratureDatabase } from '../db/database.ts'
 import type { PaperFilters, PaperRecord } from '../db/types.ts'
 import { normalizeDoi, toPaperInput, type CrossrefSearchApi, type CrossrefWork } from './crossref.ts'
+import { isInDateWindow, recentWindow } from './dates.ts'
+import { normalizeOrcid } from './orcid.ts'
 import type { GetResult, PaperHit, PaperSource, SearchOptions, SearchResult } from './types.ts'
 
 export { normalizeDoi } from './crossref.ts'
@@ -90,6 +92,20 @@ export class LiteratureSearchEngine {
     if (trimmed.length === 0) {
       return { ok: false, code: 'invalid_query', message: 'query must be a non-empty string' }
     }
+    const orcidRaw = options.orcid?.trim() ?? ''
+    const orcid = orcidRaw.length === 0 ? null : normalizeOrcid(orcidRaw)
+    if (orcidRaw.length > 0 && orcid === null) {
+      return { ok: false, code: 'invalid_orcid', message: 'orcid must match 0000-0000-0000-0000.' }
+    }
+    if (options.recentDays !== undefined) {
+      const days = Math.trunc(options.recentDays)
+      if (!Number.isFinite(days) || days < 1) {
+        return { ok: false, code: 'invalid_query', message: 'recentDays must be a positive integer' }
+      }
+    }
+    const window = options.recentDays !== undefined ? recentWindow(options.recentDays) : null
+    const useDateSort = orcid !== null
+    const topicRecentWindow = orcid === null && window !== null
     const limit = clamp(options.limit ?? 20, 1, 50)
     const sources = options.sources ?? 'both'
     const warnings: string[] = []
@@ -99,7 +115,7 @@ export class LiteratureSearchEngine {
 
     const localFilters: PaperFilters = {
       query: trimmed,
-      limit,
+      limit: topicRecentWindow ? 100 : limit,
       ...options.journal !== undefined && options.journal.trim().length > 0 ? { journal: options.journal } : {},
       ...options.fromYear !== undefined ? { fromYear: options.fromYear } : {},
       ...options.toYear !== undefined ? { toYear: options.toYear } : {},
@@ -121,19 +137,32 @@ export class LiteratureSearchEngine {
     if (sources === 'crossref' || sources === 'both') {
       usedSources.push('crossref')
       const filterParts: string[] = []
+      if (orcid !== null) {
+        filterParts.push(`orcid:${orcid}`)
+        if (window !== null) {
+          filterParts.push(`from-pub-date:${window.start}`)
+          filterParts.push(`until-pub-date:${window.end}`)
+        }
+      }
       if (options.fromYear !== undefined) filterParts.push(`from-pub-date:${options.fromYear}-01-01`)
       if (options.toYear !== undefined) filterParts.push(`until-pub-date:${options.toYear}-12-31`)
       if (options.journal !== undefined && options.journal.trim().length > 0) {
         filterParts.push(`container-title:${options.journal.trim()}`)
       }
       filterParts.push('type:journal-article')
+      if (topicRecentWindow && window !== null) {
+        // Retrieval net only: newly created Crossref records, still ranked by
+        // relevance. Do not use from-pub-date / sort=published (polluted dates).
+        filterParts.push(`from-created-date:${window.start}`)
+      }
+      const fetchRows = topicRecentWindow ? Math.min(100, Math.max(limit * 5, 50)) : limit
       try {
         const page = await this.crossref.searchWorks({
           query: trimmed,
-          rows: limit,
+          rows: fetchRows,
           filter: filterParts.join(','),
-          sort: options.sortBy === 'date' ? 'published' : 'relevance',
-          ...options.sortBy === 'date' ? { order: 'desc' as const } : {},
+          sort: useDateSort ? 'published' : 'relevance',
+          ...useDateSort ? { order: 'desc' as const } : {},
         }, signal)
         truncated = page.total > page.works.length
         for (const work of page.works) {
@@ -155,9 +184,18 @@ export class LiteratureSearchEngine {
     }
 
     let papers = [...merged.values()]
-    if (options.sortBy === 'date') {
-      papers = papers.sort((a, b) => (b.year ?? 0) - (a.year ?? 0))
+    if (window !== null) {
+      papers = papers.filter(paper => isInDateWindow(paper.publicationDate, window.start, window.end))
     }
+    if (useDateSort) {
+      papers = papers.sort((left, right) => {
+        const byDate = (right.publicationDate ?? '').localeCompare(left.publicationDate ?? '')
+        return byDate !== 0 ? byDate : (right.year ?? 0) - (left.year ?? 0)
+      })
+    } else if (options.sortBy === 'date') {
+      papers = papers.sort((left, right) => (right.year ?? 0) - (left.year ?? 0))
+    }
+    if (papers.length > limit) truncated = true
     return {
       ok: true,
       query: trimmed,

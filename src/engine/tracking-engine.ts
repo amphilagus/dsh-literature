@@ -17,6 +17,7 @@ import {
 import type { ArxivSearchApi } from './arxiv.ts'
 import { normalizeDoi, toPaperInput } from './crossref.ts'
 import type { CrossrefSearchApi } from './crossref.ts'
+import { isInDateWindow, recentWindow } from './dates.ts'
 
 /** One candidate hit returned to the screening agent. */
 export interface TrackingCandidate {
@@ -48,14 +49,6 @@ export interface TrackingSearchOutcome {
   /** Hits auto-filtered because this direction already curates them. */
   excluded_already_curated: DedupedHit[]
   warnings: string[]
-}
-
-function isoDaysAgo(days: number): string {
-  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
-}
-
-function isoToday(): string {
-  return new Date().toISOString().slice(0, 10)
 }
 
 function parseWhitelist(raw: string | null): Set<string> | null {
@@ -90,8 +83,7 @@ export class TrackingSearchEngine {
   /** Run one direction's search. Throws on remote failures after retries. */
   async searchPlan(plan: TrackingPlanRecord, signal?: AbortSignal): Promise<TrackingSearchOutcome> {
     const warnings: string[] = []
-    const windowStart = isoDaysAgo(Math.max(1, plan.time_window_days) - 1)
-    const windowEnd = isoToday()
+    const { start: windowStart, end: windowEnd } = recentWindow(Math.max(1, plan.time_window_days))
     const logId = this.db.startSearchLog(plan.id, windowStart, windowEnd)
 
     const byId = new Map<string, TrackingCandidate>()
@@ -103,7 +95,6 @@ export class TrackingSearchEngine {
     }
 
     // --- Crossref leg
-    const filter = `from-pub-date:${windowStart},until-pub-date:${windowEnd}`
     if (plan.kind === 'person') {
       const orcidFilter = plan.orcid !== null && plan.orcid.trim().length > 0
         ? `,orcid:${plan.orcid.trim()}`
@@ -112,7 +103,7 @@ export class TrackingSearchEngine {
         const page = await this.crossref.searchWorks({
           query: plan.name,
           rows: 100,
-          filter: `${filter}${orcidFilter}`,
+          filter: `from-pub-date:${windowStart},until-pub-date:${windowEnd}${orcidFilter}`,
           sort: 'published',
           order: 'desc',
         }, signal)
@@ -139,9 +130,7 @@ export class TrackingSearchEngine {
         const page = await this.crossref.searchWorks({
           query: plan.name,
           rows: 100,
-          filter,
-          sort: 'published',
-          order: 'desc',
+          sort: 'relevance',
         }, signal)
         for (const work of page.works) {
           if (whitelist !== null) {
@@ -150,6 +139,7 @@ export class TrackingSearchEngine {
           }
           const input = toPaperInput(work)
           if (input === null) continue
+          if (!isInDateWindow(input.publication_date ?? null, windowStart, windowEnd)) continue
           if (this.options.cacheRemote !== false) this.db.upsertPaper(input)
           push({
             unique_id: input.doi.toLowerCase(),

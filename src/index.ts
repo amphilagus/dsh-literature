@@ -86,14 +86,14 @@ function tryGrantLiteratureDataRoot(ctx: Context, dataDir: string): void {
 }
 
 const TOOL_GUIDANCE =
-  'Use literature_search (local + Crossref), literature_get (DOI), and literature_db '
+  'Use literature_search (query; optional orcid and recentDays), literature_get (DOI), and literature_db '
   + '(stats/import/backup and SCI journals by title/ISSN/CAS). Prefer a local search for papers already stored; '
-  + 'remote Crossref is rate-limited. '
+  + 'remote Crossref is rate-limited. Use recentDays for last-N-day windows, not fromYear. '
   + 'Tracking: tracking_plan_add/list/remove, tracking_search, tracking_curate, tracking_log_complete, '
   + 'tracking_curated_list, tracking_log_list. '
   + 'Researcher identity: researcher_profile_disambiguate, researcher_profile_upsert, '
   + 'researcher_profile_query, researcher_profile_remove (档案跨会话存活; 建 person 方向前先消歧并建档). '
-  + 'Load literature-survey for a one-off topic survey, literature-tracking-setup before configuring a direction, '
+  + 'Load literature-survey for a one-off topic or author survey, literature-tracking-setup before configuring a direction, '
   + 'and literature-tracking-search before a scheduled tracking run.'
 
 /**
@@ -140,7 +140,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
   ctx.skills.register({
     name: SKILL_SURVEY,
-    description: 'One-off literature survey of a topic or author: local + Crossref search and a relevance-ranked digest. Not a tracking plan.',
+    description: 'One-off literature survey of a topic or author via literature_search (optional recentDays / orcid). Not a tracking plan.',
     source: 'runtime',
     content: SKILL_SURVEY_CONTENT,
   })
