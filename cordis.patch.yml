@@ -1,6 +1,10 @@
-# dsh-literature bundle patch: insert the scientific-literature search plugin
-# and schedule. Both stay off on the host; the 文献跟踪助理 preset remounts
-# them with enabled: true.
+# dsh-literature bundle patch: insert literature-search (plugin-level
+# enabled: false) and schedule (loader-level disabled: true). The
+# 文献跟踪助理 preset remounts both as active rows.
+#
+# Schedule has no config.enabled: host must use `disabled: true` so Loader
+# never calls apply(). A preset row without `disabled` is a different entry
+# and does apply.
 #
 # Per-user overrides belong in the profile's own cordis.patch.yml, addressed
 # by id:
@@ -16,5 +20,4 @@
         enabled: false
     - id: schedule
       name: '@deepseek-ai/dsh-schedule'
-      config:
-        enabled: false
+      disabled: true

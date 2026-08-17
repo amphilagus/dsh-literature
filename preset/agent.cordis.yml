@@ -1,7 +1,7 @@
 # 文献跟踪助理 — 文献检索 / 定向跟踪 agent。
 #
-# web profile 里 literature 与 schedule 的主开关都是 enabled: false。
-# 本预设把这两个插件重新挂载为 enabled: true：工具只注册进本 scope。
+# host 上 literature 是 config.enabled: false（空壳 apply）；schedule 是
+# disabled: true（Loader 不 apply）。本预设另写两行把它俩真正挂上。
 #
 # literature 服务必须待在带 `isolate` realm 的 group 里（`true` = entry-local）：
 # 直接发布进 root realm 会让一个数据库实例变成进程全局，dsh-agent-presets
@@ -45,12 +45,10 @@
       config:
         enabled: true
 
-# schedule 不发布服务，只在认父到本 preset 的 root agent 上注册
-# schedule_create / schedule_list / schedule_delete。
+# host 上同 id 的 schedule 带 disabled: true，不会 apply。这里是另一行，
+# 不带 disabled，只给认父到本 preset 的 root agent 注册三个工具。
 - id: schedule
   name: '@deepseek-ai/dsh-schedule'
-  config:
-    enabled: true
 
 # ── shell ───────────────────────────────────────────────────────────────────
 

@@ -48,7 +48,9 @@ dsh plugin --profile web add "link:/绝对路径/dsh-literature"
 
 ### 2. 安装 schedule 包（仍须在 profile 的 node_modules 里）
 
-`@deepseek-ai/dsh-schedule` 不在默认 web 组合里。文献 bundle 会插入一行 `enabled: false` 的 schedule，preset 再以 `enabled: true` 重挂。包本身还是要装进 profile，否则那一行解析失败：
+`@deepseek-ai/dsh-schedule` 不在默认 web 组合里。文献 bundle 会插入一行 **`disabled: true`** 的 schedule（Loader 不 `apply`，标准模式没有 `schedule_*`）。preset 里再写一行**不带** `disabled` 的 schedule，只有文献跟踪助理会真正挂上工具。
+
+包本身还是要装进 profile 的 `node_modules`（`disabled` 不会替你装依赖），否则 preset 那一行解析失败：
 
 ```sh
 dsh plugin --profile web add "link:/绝对路径/deepseek-harness/packages/schedule/schedule"
