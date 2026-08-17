@@ -26,17 +26,18 @@ export const SKILL_TRACKING_SETUP_CONTENT = `# 文献跟踪方向配置 (literat
 - 原则：只放该主题真正会发文章的期刊；宁可少而准，不要大而全。示例（快重离子辐照理论）：NIM-B 0168-583X / Radiation Physics and Chemistry 0969-806X / JAP 0021-8979 / PRB 2469-9969 / PRA 2469-9926 / Comput. Mater. Sci. 0927-0256 / J. Nucl. Mater. 0022-3115 / Matter Radiat. Extremes 2468-2047 / NST 1001-8042 等。
 - 不确定时先问用户要白名单，或提供候选列表请用户勾选。
 
-### 3. 研究者方向：ORCID 查证
-- ORCID 是硬性必填。若用户只给名字：
-  1. 用 ORCID public API 按姓名+单位查：
-     curl -s -H "Accept: application/json" "https://pub.orcid.org/v3.0/expanded-search/?q=family-name:X+AND+given-names:Y+AND+affiliation-org-name:Z"
+### 3. 研究者方向：ORCID 查证与建档
+- ORCID 是硬性必填。下次会话先 researcher_profile_query（按姓名或 ORCID）；已有档案则复用其 ORCID / 方向 / 消歧证据，不要重新消歧。
+- 若用户只给名字、档案里还没有：
+  1. 用 researcher_profile_disambiguate(family_name, given_name, affiliation?) 查同名候选（不要自己 curl ORCID）。
   2. 与用户确认选中的 ORCID（同名很常见，务必确认单位）。
-- 名字存英文全名（如 "Andrea Sand"），arXiv 作者检索依赖英文名。
+  3. 用 researcher_profile_upsert 建档：写入 name、orcid、disambiguation_notes（为何是这个人），以及已归纳的 research_areas。
+- 名字存英文全名（如 "Andrea Sand"），arXiv 作者检索依赖英文名；中文名放 name_zh。
 
 ### 4. 写入跟踪方案表
 用 tracking_plan_add：
 - topic: name/kind/journal_whitelist/time_window_days/notes(英文关键词)
-- person: name/kind/orcid/time_window_days
+- person: name/kind/orcid/time_window_days。若该 ORCID 已有档案，工具会回写档案的 plan_id；若档案尚未建，先 upsert 再 add，或 add 后再 upsert(plan_id=该方案)。
 - time_window_days: 近3天=3 / 近一周=7 / 近一月=30（默认7）
 - search_interval_days: 排班周期天数（默认7；高频方向可用3）
 
@@ -51,7 +52,7 @@ export const SKILL_TRACKING_SETUP_CONTENT = `# 文献跟踪方向配置 (literat
 ### 6. 维护
 - 暂停：用 tracking_plan_add 重写该方向并传 enabled=0（其余字段按原值），并 schedule_delete 对应提醒；恢复传 enabled=1 并重建提醒。
 - 删除方向：tracking_plan_remove（其新库与搜索记录一并删除，先与用户确认）。
-- 查看现状：tracking_plan_list / tracking_curated_list / tracking_log_list。
+- 查看现状：tracking_plan_list / tracking_curated_list / tracking_log_list / researcher_profile_query。
 
 ## 完成标志
 - tracking_plan_add 返回该方向配置；schedule_create 返回 schedule id（记下来，写入回复）。

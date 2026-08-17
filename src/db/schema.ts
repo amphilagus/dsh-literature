@@ -1,12 +1,13 @@
 /**
  * SQLite DDL for the literature database: papers, journals, an FTS5
  * full-text index over the searchable paper fields, sync triggers, and the
- * v2 literature-tracking tables (tracking plans, curated papers, search logs).
+ * v2 literature-tracking tables (tracking plans, curated papers, search logs),
+ * and the v3 researcher-profile table.
  * @module @amphilagus/dsh-literature/db/schema
  */
 
 /** Current database schema version, recorded in the `meta` table. */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export const SCHEMA_DDL = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -129,4 +130,31 @@ export const SCHEMA_DDL = [
   )`,
 
   `CREATE INDEX IF NOT EXISTS idx_search_logs_plan ON search_logs(plan_id)`,
+
+  // ------------------------------------------------- v3: researcher profiles
+
+  // 研究员档案: 身份/方向/消歧证据跨会话存活. id = profile-{orcid}.
+  `CREATE TABLE IF NOT EXISTS researcher_profiles (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    family_name TEXT,
+    given_name TEXT,
+    name_zh TEXT,
+    orcid TEXT NOT NULL UNIQUE,
+    institution TEXT,
+    homepage TEXT,
+    email TEXT,
+    research_areas TEXT,
+    aliases TEXT,
+    disambiguation_notes TEXT,
+    plan_id TEXT REFERENCES tracking_plans(id) ON DELETE SET NULL,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_profiles_orcid ON researcher_profiles(orcid)`,
+  `CREATE INDEX IF NOT EXISTS idx_profiles_plan ON researcher_profiles(plan_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_profiles_name ON researcher_profiles(family_name, given_name)`,
 ]

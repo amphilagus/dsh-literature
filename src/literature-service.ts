@@ -10,6 +10,7 @@ import { bundledSciJournalsPath, installSciJournalsCatalog, SciJournalCatalog } 
 import { LiteratureDatabase } from './db/database.ts'
 import { ArxivClient, DEFAULT_ARXIV_BASE_URL } from './engine/arxiv.ts'
 import { CrossrefClient, DEFAULT_CROSSREF_BASE_URL } from './engine/crossref.ts'
+import { DEFAULT_ORCID_BASE_URL, OrcidClient } from './engine/orcid.ts'
 import { LiteratureSearchEngine } from './engine/engine.ts'
 import { TrackingSearchEngine } from './engine/tracking-engine.ts'
 
@@ -18,7 +19,7 @@ export function defaultDbPath(): string {
   return dshHomePath('data', 'literature', 'literature.db')
 }
 
-export { DEFAULT_CROSSREF_BASE_URL, DEFAULT_ARXIV_BASE_URL }
+export { DEFAULT_CROSSREF_BASE_URL, DEFAULT_ARXIV_BASE_URL, DEFAULT_ORCID_BASE_URL }
 
 /** Plugin configuration; every field is optional with a production default. */
 export interface LiteratureConfig {
@@ -38,6 +39,8 @@ export interface LiteratureConfig {
   crossrefBaseUrl?: string
   /** arXiv export API base URL. */
   arxivBaseUrl?: string
+  /** ORCID Public API root; default `https://pub.orcid.org/v3.0`. */
+  orcidBaseUrl?: string
   /** Store Crossref hits into the local database. Default true. */
   cacheRemote?: boolean
   /** Per-request remote timeout in ms. Default 15000. */
@@ -53,6 +56,8 @@ export class LiteratureService extends Service {
   readonly crossref: CrossrefClient
   /** The arXiv client backing the tracking engine. */
   readonly arxiv: ArxivClient
+  /** The ORCID public client (expanded-search disambiguation). */
+  readonly orcid: OrcidClient
   /** The literature-tracking dual-source engine (Crossref + arXiv). */
   readonly tracking: TrackingSearchEngine
   /** Bundled SCI journal catalog (ISSN / eISSN, CAS partition, impact factor). */
@@ -69,6 +74,11 @@ export class LiteratureService extends Service {
     })
     this.arxiv = new ArxivClient({
       baseUrl: config.arxivBaseUrl ?? DEFAULT_ARXIV_BASE_URL,
+      timeoutMs: config.remoteTimeoutMs ?? 20_000,
+    })
+    this.orcid = new OrcidClient({
+      baseUrl: config.orcidBaseUrl ?? DEFAULT_ORCID_BASE_URL,
+      ...config.mailto !== undefined && config.mailto.trim().length > 0 ? { mailto: config.mailto } : {},
       timeoutMs: config.remoteTimeoutMs ?? 20_000,
     })
     this.engine = new LiteratureSearchEngine(

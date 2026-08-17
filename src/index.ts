@@ -11,7 +11,8 @@
  * - `literature_db` — database management (stats, import, backup, ...);
  * - literature tracking — tracking-plan table, dual-source (Crossref + arXiv)
  *   windowed tracking_search with first-pass dedupe, curated direction
- *   libraries, search logs, and the screening/scheduling runtime skills.
+ *   libraries, search logs, researcher profiles, and the screening/scheduling
+ *   runtime skills.
  * @module @amphilagus/dsh-literature
  */
 
@@ -24,19 +25,22 @@ import type { LiteratureConfig } from './literature-service.ts'
 import { SKILL_TRACKING_SEARCH, SKILL_TRACKING_SEARCH_CONTENT, SKILL_TRACKING_SETUP, SKILL_TRACKING_SETUP_CONTENT } from './skills.ts'
 import { registerLiteratureDbTool } from './tools/db.ts'
 import { registerLiteratureGetTool } from './tools/get.ts'
+import { registerResearcherTools } from './tools/researcher.ts'
 import { registerLiteratureSearchTool } from './tools/search.ts'
 import { registerTrackingTools } from './tools/tracking.ts'
 
-export { LiteratureService, defaultDbPath, DEFAULT_CROSSREF_BASE_URL, DEFAULT_ARXIV_BASE_URL } from './literature-service.ts'
+export { LiteratureService, defaultDbPath, DEFAULT_CROSSREF_BASE_URL, DEFAULT_ARXIV_BASE_URL, DEFAULT_ORCID_BASE_URL } from './literature-service.ts'
 export type { LiteratureConfig } from './literature-service.ts'
 export { bundledSciJournalsPath, installSciJournalsCatalog, SciJournalCatalog } from './db/catalog.ts'
 export type { SciJournalHit, SciJournalSearchOptions } from './db/catalog.ts'
 export type { DatabaseStats, ImportResult, JournalInput, JournalRecord, PaperFilters, PaperInput, PaperRecord } from './db/types.ts'
-export type { CuratedPaperRecord, CuratedPaperView, CurationRelevance, SearchFinding, SearchLogRecord, TrackingPlanInput, TrackingPlanKind, TrackingPlanRecord } from './db/types.ts'
+export type { CuratedPaperRecord, CuratedPaperView, CurationRelevance, SearchFinding, SearchLogRecord, TrackingPlanInput, TrackingPlanKind, TrackingPlanRecord, ResearcherProfileInput, ResearcherProfileRecord, ResearcherProfileStatus } from './db/types.ts'
 export { CrossrefClient, CrossrefError, DEFAULT_CROSSREF_BASE_URL as CROSSREF_BASE_URL, normalizeDoi, stripJats, toPaperInput } from './engine/crossref.ts'
 export type { CrossrefClientOptions, CrossrefSearchApi, CrossrefSearchPage, CrossrefWork, SearchWorksParams } from './engine/crossref.ts'
 export { ArxivClient, ArxivError, DEFAULT_ARXIV_BASE_URL as ARXIV_BASE_URL, arxivAuthorQuery, arxivUniqueId, parseArxivEntry, toArxivPaperInput } from './engine/arxiv.ts'
 export type { ArxivClientOptions, ArxivEntry, ArxivSearchApi, ArxivSearchParams } from './engine/arxiv.ts'
+export { OrcidClient, OrcidError, DEFAULT_ORCID_BASE_URL as ORCID_BASE_URL, ORCID_PATTERN, normalizeOrcid, parseExpandedResults, profileIdFromOrcid } from './engine/orcid.ts'
+export type { OrcidCandidate, OrcidClientOptions, OrcidExpandedSearchParams } from './engine/orcid.ts'
 export { LiteratureSearchEngine, toHit, toHitFromWork } from './engine/engine.ts'
 export type { LiteratureEngineOptions } from './engine/engine.ts'
 export { TrackingSearchEngine, normalizeCandidateId } from './engine/tracking-engine.ts'
@@ -46,6 +50,7 @@ export { registerLiteratureDbTool, LITERATURE_DB_TOOL_NAME } from './tools/db.ts
 export { registerLiteratureGetTool, LITERATURE_GET_TOOL_NAME } from './tools/get.ts'
 export { registerLiteratureSearchTool, LITERATURE_SEARCH_TOOL_NAME } from './tools/search.ts'
 export { registerTrackingTools, TRACKING_CURATE_TOOL_NAME, TRACKING_CURATED_LIST_TOOL_NAME, TRACKING_LOG_COMPLETE_TOOL_NAME, TRACKING_LOG_LIST_TOOL_NAME, TRACKING_PLAN_ADD_TOOL_NAME, TRACKING_PLAN_LIST_TOOL_NAME, TRACKING_PLAN_REMOVE_TOOL_NAME, TRACKING_SEARCH_TOOL_NAME } from './tools/tracking.ts'
+export { registerResearcherTools, RESEARCHER_PROFILE_DISAMBIGUATE_TOOL_NAME, RESEARCHER_PROFILE_QUERY_TOOL_NAME, RESEARCHER_PROFILE_REMOVE_TOOL_NAME, RESEARCHER_PROFILE_UPSERT_TOOL_NAME } from './tools/researcher.ts'
 export { SKILL_TRACKING_SEARCH, SKILL_TRACKING_SETUP } from './skills.ts'
 
 /** Cordis function-plugin name. */
@@ -90,7 +95,9 @@ const TOOL_GUIDANCE =
   + 'For the literature-tracking workflow use tracking_plan_add/list/remove (跟踪方案表), tracking_search '
   + '(Crossref + arXiv windowed search with first-pass dedupe), tracking_curate (curate into a direction '
   + 'library), tracking_log_complete (fill the search log — the run\'s completion endpoint), and '
-  + 'tracking_curated_list/tracking_log_list to inspect. Load the literature-tracking-setup or '
+  + 'tracking_curated_list/tracking_log_list to inspect. For persistent researcher identity use '
+  + 'researcher_profile_disambiguate, researcher_profile_upsert, researcher_profile_query, and '
+  + 'researcher_profile_remove (档案跨会话存活; 建 person 方向前先消歧并建档). Load the literature-tracking-setup or '
   + 'literature-tracking-search skill before configuring directions or running a scheduled search.'
 
 /**
@@ -120,6 +127,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   registerLiteratureGetTool(ctx, service)
   registerLiteratureDbTool(ctx, service)
   registerTrackingTools(ctx, service)
+  registerResearcherTools(ctx, service)
 
   // Runtime skills: the workflows the tools deliberately leave to the agent.
   ctx.skills.register({

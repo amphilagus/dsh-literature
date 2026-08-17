@@ -24,6 +24,9 @@ import type {
   SearchLogRecord,
   TrackingPlanInput,
   TrackingPlanRecord,
+  ResearcherProfileInput,
+  ResearcherProfileRecord,
+  ResearcherProfileStatus,
   CurationRelevance,
 } from './types.ts'
 
@@ -91,6 +94,7 @@ export class LiteratureDatabase {
     try {
       db.exec('PRAGMA journal_mode = WAL')
       db.exec('PRAGMA synchronous = NORMAL')
+      db.exec('PRAGMA foreign_keys = ON')
       for (const statement of SCHEMA_DDL) db.exec(statement)
       db.prepare(
         `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
@@ -417,6 +421,155 @@ export class LiteratureDatabase {
     const result = this.requireDb().prepare(
       'DELETE FROM tracking_plans WHERE id = ? OR name = ?',
     ).run(idOrName, idOrName)
+    return result.changes > 0
+  }
+
+  // -------------------------------------------------- researcher profiles
+
+  /** Insert or update one researcher profile. Same ORCID (same id) updates in place. */
+  upsertResearcherProfile(input: ResearcherProfileInput): boolean {
+    const db = this.requireDb()
+    const existing = this.getResearcherProfileById(input.id)
+    const base: ResearcherProfileRecord = existing ?? {
+      id: input.id,
+      display_name: input.display_name,
+      family_name: null,
+      given_name: null,
+      name_zh: null,
+      orcid: input.orcid,
+      institution: null,
+      homepage: null,
+      email: null,
+      research_areas: null,
+      aliases: null,
+      disambiguation_notes: null,
+      plan_id: null,
+      notes: null,
+      status: 'active',
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    }
+    const record: ResearcherProfileRecord = {
+      ...base,
+      ...definedEntries(input),
+      id: input.id,
+      display_name: input.display_name,
+      orcid: input.orcid,
+      updated_at: nowIso(),
+    }
+    db.prepare(
+      `INSERT INTO researcher_profiles (
+         id, display_name, family_name, given_name, name_zh, orcid,
+         institution, homepage, email, research_areas, aliases,
+         disambiguation_notes, plan_id, notes, status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         display_name = excluded.display_name,
+         family_name = excluded.family_name,
+         given_name = excluded.given_name,
+         name_zh = excluded.name_zh,
+         orcid = excluded.orcid,
+         institution = excluded.institution,
+         homepage = excluded.homepage,
+         email = excluded.email,
+         research_areas = excluded.research_areas,
+         aliases = excluded.aliases,
+         disambiguation_notes = excluded.disambiguation_notes,
+         plan_id = excluded.plan_id,
+         notes = excluded.notes,
+         status = excluded.status,
+         updated_at = excluded.updated_at`,
+    ).run(
+      record.id,
+      record.display_name,
+      record.family_name,
+      record.given_name,
+      record.name_zh,
+      record.orcid,
+      record.institution,
+      record.homepage,
+      record.email,
+      record.research_areas,
+      record.aliases,
+      record.disambiguation_notes,
+      record.plan_id,
+      record.notes,
+      record.status,
+      record.created_at,
+      record.updated_at,
+    )
+    return true
+  }
+
+  /** Unique lookup by primary key. */
+  getResearcherProfileById(id: string): ResearcherProfileRecord | null {
+    const row = this.requireDb().prepare(
+      'SELECT * FROM researcher_profiles WHERE id = ?',
+    ).get(id)
+    return asRecord<ResearcherProfileRecord>(row)
+  }
+
+  /**
+   * Resolve a profile key: id, then ORCID, then exact `display_name` / `name_zh`.
+   * Name matches may return more than one row; callers must not take the first silently.
+   */
+  findResearcherProfiles(key: string): ResearcherProfileRecord[] {
+    const db = this.requireDb()
+    const byId = asRecord<ResearcherProfileRecord>(
+      db.prepare('SELECT * FROM researcher_profiles WHERE id = ?').get(key),
+    )
+    if (byId !== null) return [byId]
+    const byOrcid = asRecord<ResearcherProfileRecord>(
+      db.prepare('SELECT * FROM researcher_profiles WHERE orcid = ?').get(key),
+    )
+    if (byOrcid !== null) return [byOrcid]
+    const rows = db.prepare(
+      'SELECT * FROM researcher_profiles WHERE display_name = ? OR name_zh = ?',
+    ).all(key, key)
+    return rows as unknown as ResearcherProfileRecord[]
+  }
+
+  listResearcherProfiles(status: ResearcherProfileStatus = 'active', limit = 50): ResearcherProfileRecord[] {
+    const rows = this.requireDb().prepare(
+      `SELECT * FROM researcher_profiles WHERE status = ?
+       ORDER BY display_name ASC LIMIT ?`,
+    ).all(status, clampInteger(limit, 1, 200))
+    return rows as unknown as ResearcherProfileRecord[]
+  }
+
+  searchResearcherProfiles(
+    query: string,
+    status: ResearcherProfileStatus = 'active',
+    limit = 50,
+  ): ResearcherProfileRecord[] {
+    const like = `%${escapeLike(query)}%`
+    const rows = this.requireDb().prepare(
+      `SELECT * FROM researcher_profiles
+       WHERE status = ?
+         AND (
+           display_name LIKE ? ESCAPE '\\'
+           OR IFNULL(name_zh, '') LIKE ? ESCAPE '\\'
+           OR IFNULL(institution, '') LIKE ? ESCAPE '\\'
+           OR IFNULL(research_areas, '') LIKE ? ESCAPE '\\'
+           OR IFNULL(aliases, '') LIKE ? ESCAPE '\\'
+         )
+       ORDER BY display_name ASC LIMIT ?`,
+    ).all(status, like, like, like, like, like, clampInteger(limit, 1, 200))
+    return rows as unknown as ResearcherProfileRecord[]
+  }
+
+  deleteResearcherProfile(id: string): boolean {
+    const result = this.requireDb().prepare(
+      'DELETE FROM researcher_profiles WHERE id = ?',
+    ).run(id)
+    return result.changes > 0
+  }
+
+  /** Point an existing profile at a tracking plan. No-op when the ORCID is unknown. */
+  linkProfilePlanByOrcid(orcid: string, planId: string): boolean {
+    const result = this.requireDb().prepare(
+      `UPDATE researcher_profiles SET plan_id = ?, updated_at = ? WHERE orcid = ?`,
+    ).run(planId, nowIso(), orcid)
     return result.changes > 0
   }
 

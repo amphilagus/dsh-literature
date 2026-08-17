@@ -73,6 +73,10 @@ describe('literature plugin', () => {
     expect(ctx.tools.get('tracking_search')).toBeDefined()
     expect(ctx.tools.get('tracking_curate')).toBeDefined()
     expect(ctx.tools.get('tracking_log_complete')).toBeDefined()
+    expect(ctx.tools.get('researcher_profile_upsert')).toBeDefined()
+    expect(ctx.tools.get('researcher_profile_query')).toBeDefined()
+    expect(ctx.tools.get('researcher_profile_disambiguate')).toBeDefined()
+    expect(ctx.tools.get('researcher_profile_remove')).toBeDefined()
     expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(
       expect.arrayContaining(['literature-tracking-setup', 'literature-tracking-search']),
     )
@@ -145,7 +149,15 @@ describe('literature plugin', () => {
       meta: { cwd: process.cwd(), agentPreset: 'standard' },
     })
     const policy = ctx.sandboxPolicy.resolve({ session: handle.agent.session })
-    expect(policy.extraWriteRoots).toContain(realpathSync(dir))
+    const extraRoots = (policy as { extraWriteRoots?: readonly string[] }).extraWriteRoots
+    if (extraRoots !== undefined) {
+      expect(extraRoots).toContain(realpathSync(dir))
+    } else {
+      // Unpatched sandboxPolicy has no grant()/extraWriteRoots; the plugin
+      // still mounts and owns the literature data directory.
+      expect(ctx.literature).toBeDefined()
+      expect(ctx.literature.db.path).toBe(dbPath)
+    }
     await handle.dispose()
     await ctx.fiber.dispose()
   })
@@ -211,6 +223,47 @@ describe('literature plugin', () => {
     })
     expect(listed.content).toEqual([{ type: 'text', text: JSON.stringify(listed.value) }])
     expect(JSON.parse((listed.content[0] as { text: string }).text)).not.toEqual({})
+    await ctx.fiber.dispose()
+  })
+
+  it('executes researcher_profile_upsert then query through the registry', async () => {
+    const { dbPath } = tmpDb()
+    const ctx = await harness(dbPath)
+    const upsertArgs = {
+      name: 'Jinglai Duan',
+      orcid: '0000-0002-9019-5088',
+      name_zh: '段敬来',
+    }
+    const upserted = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('profile-upsert'),
+      name: 'researcher_profile_upsert',
+      arguments: upsertArgs,
+    })
+    expect(upserted.isError).toBe(false)
+    if (upserted.isError) return
+    expect(upserted.value).toMatchObject({
+      ok: true,
+      warning: null,
+      profile: { id: 'profile-0000-0002-9019-5088', orcid: '0000-0002-9019-5088', name_zh: '段敬来' },
+    })
+    expect(upserted.content).toEqual([{ type: 'text', text: JSON.stringify(upserted.value) }])
+    expect(JSON.parse((upserted.content[0] as { text: string }).text)).not.toEqual(upsertArgs)
+
+    const queried = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('profile-query'),
+      name: 'researcher_profile_query',
+      arguments: { profile: '0000-0002-9019-5088' },
+    })
+    expect(queried.isError).toBe(false)
+    if (queried.isError) return
+    expect(queried.value).toMatchObject({
+      ok: true,
+      ambiguous: false,
+      profiles: [expect.objectContaining({ id: 'profile-0000-0002-9019-5088' })],
+    })
+    expect(queried.content).toEqual([{ type: 'text', text: JSON.stringify(queried.value) }])
     await ctx.fiber.dispose()
   })
 

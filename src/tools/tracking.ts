@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { CurationRelevance, SearchFinding } from '../db/types.ts'
 import { normalizeCandidateId } from '../engine/tracking-engine.ts'
+import { normalizeOrcid } from '../engine/orcid.ts'
 import type { LiteratureService } from '../literature-service.ts'
 import { renderJsonValue } from './render.ts'
 import { ERROR_SCHEMA } from './schemas.ts'
@@ -129,6 +130,10 @@ export function registerTrackingPlanAddTool(ctx: Context, service: LiteratureSer
         })
         const plan = service.db.getTrackingPlan(id)
         if (plan === null) return { ok: false, code: 'plan_not_found', message: 'Plan vanished after upsert.' }
+        if (kind === 'person' && plan.orcid !== null) {
+          const linked = normalizeOrcid(plan.orcid)
+          if (linked !== null) service.db.linkProfilePlanByOrcid(linked, plan.id)
+        }
         return {
           id: plan.id,
           name: plan.name,

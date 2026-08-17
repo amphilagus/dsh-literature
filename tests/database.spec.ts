@@ -33,7 +33,7 @@ describe('LiteratureDatabase', () => {
   it('creates the file, dir, and schema on open', () => {
     const { db, dir } = useDb()
     expect(db.isOpen).toBe(true)
-    expect(db.stats().schemaVersion).toBe(2)
+    expect(db.stats().schemaVersion).toBe(3)
     expect(db.stats().paperCount).toBe(0)
     expect(db.stats().journalCount).toBe(0)
     expect(db.path.startsWith(dir)).toBe(true)
@@ -187,5 +187,134 @@ describe('LiteratureDatabase', () => {
     const { db } = useDb()
     db.upsertPaper(paper({ doi: '10.1000/a', title: 'Something' }))
     expect(db.searchPapers({ query: 'zzzz-no-match' })).toEqual([])
+  })
+})
+
+describe('researcher profiles', () => {
+  it('upserts by ORCID-derived id and keeps a Chinese display name', () => {
+    const { db } = useDb()
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-9019-5088',
+      display_name: '段敬来 (Jinglai Duan)',
+      orcid: '0000-0002-9019-5088',
+      name_zh: '段敬来',
+      family_name: 'Duan',
+      given_name: 'Jinglai',
+      research_areas: JSON.stringify([{ area: 'ion track', confidence: 0.9, evidence: 'ORCID titles' }]),
+    })
+    const found = db.findResearcherProfiles('0000-0002-9019-5088')
+    expect(found).toHaveLength(1)
+    expect(found[0]?.id).toBe('profile-0000-0002-9019-5088')
+    expect(found[0]?.display_name).toBe('段敬来 (Jinglai Duan)')
+    expect(db.findResearcherProfiles('段敬来').map(row => row.id)).toEqual(['profile-0000-0002-9019-5088'])
+    expect(db.findResearcherProfiles('profile-0000-0002-9019-5088')).toHaveLength(1)
+  })
+
+  it('updates only supplied fields on a second upsert', () => {
+    const { db } = useDb()
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-9019-5088',
+      display_name: 'Jinglai Duan',
+      orcid: '0000-0002-9019-5088',
+      notes: 'keep me',
+      institution: 'IMP',
+    })
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-9019-5088',
+      display_name: '段敬来 (Jinglai Duan)',
+      orcid: '0000-0002-9019-5088',
+      institution: 'Institute of Modern Physics, CAS',
+    })
+    const row = db.getResearcherProfileById('profile-0000-0002-9019-5088')
+    expect(row?.display_name).toBe('段敬来 (Jinglai Duan)')
+    expect(row?.institution).toBe('Institute of Modern Physics, CAS')
+    expect(row?.notes).toBe('keep me')
+  })
+
+  it('lists, searches, and hides archived profiles from the default list', () => {
+    const { db } = useDb()
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-9019-5088',
+      display_name: 'Jinglai Duan',
+      orcid: '0000-0002-9019-5088',
+      institution: 'Institute of Modern Physics',
+      research_areas: JSON.stringify([{ area: 'ion track' }]),
+    })
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0001-9041-1468',
+      display_name: 'Andrea Sand',
+      orcid: '0000-0001-9041-1468',
+      status: 'archived',
+    })
+    expect(db.listResearcherProfiles().map(row => row.orcid)).toEqual(['0000-0002-9019-5088'])
+    expect(db.listResearcherProfiles('archived').map(row => row.orcid)).toEqual(['0000-0001-9041-1468'])
+    expect(db.searchResearcherProfiles('ion track').map(row => row.id)).toEqual(['profile-0000-0002-9019-5088'])
+    expect(db.searchResearcherProfiles('Andrea')).toEqual([])
+  })
+
+  it('returns every exact name match instead of picking the first', () => {
+    const { db } = useDb()
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-0000-0001',
+      display_name: 'Li Wei',
+      orcid: '0000-0002-0000-0001',
+      name_zh: '李伟',
+    })
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-0000-0002',
+      display_name: 'Li Wei',
+      orcid: '0000-0002-0000-0002',
+      name_zh: '李伟',
+    })
+    expect(db.findResearcherProfiles('Li Wei')).toHaveLength(2)
+    expect(db.findResearcherProfiles('李伟')).toHaveLength(2)
+  })
+
+  it('nulls plan_id when the tracking plan is deleted and keeps the plan when the profile is deleted', () => {
+    const { db } = useDb()
+    db.upsertTrackingPlan({
+      id: 'plan-jinglai-duan',
+      name: 'Jinglai Duan',
+      kind: 'person',
+      orcid: '0000-0002-9019-5088',
+    })
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-9019-5088',
+      display_name: 'Jinglai Duan',
+      orcid: '0000-0002-9019-5088',
+      plan_id: 'plan-jinglai-duan',
+    })
+    expect(db.getResearcherProfileById('profile-0000-0002-9019-5088')?.plan_id).toBe('plan-jinglai-duan')
+    expect(db.deleteTrackingPlan('plan-jinglai-duan')).toBe(true)
+    expect(db.getResearcherProfileById('profile-0000-0002-9019-5088')?.plan_id).toBeNull()
+
+    db.upsertTrackingPlan({
+      id: 'plan-andrea-sand',
+      name: 'Andrea Sand',
+      kind: 'person',
+      orcid: '0000-0001-9041-1468',
+    })
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0001-9041-1468',
+      display_name: 'Andrea Sand',
+      orcid: '0000-0001-9041-1468',
+      plan_id: 'plan-andrea-sand',
+    })
+    expect(db.deleteResearcherProfile('profile-0000-0001-9041-1468')).toBe(true)
+    expect(db.getTrackingPlan('plan-andrea-sand')?.orcid).toBe('0000-0001-9041-1468')
+  })
+
+  it('survives close and reopen', () => {
+    const { db, dir } = useDb()
+    db.upsertResearcherProfile({
+      id: 'profile-0000-0002-9019-5088',
+      display_name: 'Jinglai Duan',
+      orcid: '0000-0002-9019-5088',
+    })
+    db.close()
+    const reopened = new LiteratureDatabase(join(dir, 'literature.db'))
+    reopened.open()
+    expect(reopened.getResearcherProfileById('profile-0000-0002-9019-5088')?.orcid).toBe('0000-0002-9019-5088')
+    reopened.close()
   })
 })

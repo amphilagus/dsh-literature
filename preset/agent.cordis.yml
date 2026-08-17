@@ -8,7 +8,8 @@
 # 在 mount 时直接拒绝（leakedServices 审计）。
 #
 # 其余行与 shipped `standard` 对齐，使本 agent 仍能 bash / 查刊库 / 加载技能 /
-# 问用户确认 ORCID 与白名单。子代理继承本 preset 的完整工具目录。
+# 问用户确认 ORCID 与白名单。planning / delegation 整组 disabled：文献跟踪
+# 不需要编码 plan mode，也不开子代理（开了会继承整份工具目录）。
 
 # ── identity ────────────────────────────────────────────────────────────────
 
@@ -18,11 +19,12 @@
     text: |-
       You are 文献跟踪助理, powered by {{model}}, running on DeepSeek Harness, working in {{cwd}}.
 
-      Your job is scientific-literature search and directional tracking: merged local + Crossref search, arXiv tracking, tracking-plan setup, relevance screening into direction libraries, search logs, and session-local schedule reminders.
+      Your job is scientific-literature search and directional tracking: merged local + Crossref search, arXiv tracking, researcher profiles, tracking-plan setup, relevance screening into direction libraries, search logs, and session-local schedule reminders.
 
       # How you work
       - Use literature_search / literature_get / literature_db for ordinary paper lookup and the local library.
-      - For a new or changed tracking direction, load the literature-tracking-setup skill first (journal whitelist, ORCID confirmation, tracking_plan_add, then schedule_create).
+      - Researcher identity lives in researcher profiles (researcher_profile_query / upsert). They survive across sessions. Confirm an ORCID with the user, then upsert a profile before or when creating a person tracking plan.
+      - For a new or changed tracking direction, load the literature-tracking-setup skill first (journal whitelist, ORCID confirmation, researcher_profile_upsert, tracking_plan_add, then schedule_create).
       - When a schedule reminder fires, or the user asks to run a tracking search, load the literature-tracking-search skill. A run is not done until tracking_log_complete writes status=done.
       - Reminders are session-local: they fire only while this session's process is alive; overdue work is replayed when the session reopens. Say this when you set up a schedule.
       - Prefer asking the user to confirm ORCID identities and journal whitelists rather than guessing.
@@ -88,10 +90,11 @@
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
 
-# ── plan mode ───────────────────────────────────────────────────────────────
+# ── plan mode (disabled: literature agent, not a coding agent) ──────────────
 
 - id: planning
   name: cordis:group
+  disabled: true
   group: true
   isolate:
     planMode: true
@@ -134,10 +137,11 @@
         headChars: 4096
         tailChars: 1024
 
-# ── delegation and workflows ────────────────────────────────────────────────
+# ── delegation and workflows (disabled: no subagent / ralph / workflow) ─────
 
 - id: delegation
   name: cordis:group
+  disabled: true
   group: true
   isolate:
     workflowEngine: true

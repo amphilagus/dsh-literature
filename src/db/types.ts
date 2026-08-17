@@ -172,3 +172,35 @@ export interface SearchLogCompletion {
   findings: SearchFinding[]
   summary?: string
 }
+
+// ------------------------------------------------------- researcher profiles
+
+/** Archived profiles stay in the database but are hidden from the default list. */
+export type ResearcherProfileStatus = 'active' | 'archived'
+
+/** One row of the researcher-profiles table. JSON columns are stored as TEXT. */
+export interface ResearcherProfileRecord {
+  id: string
+  display_name: string
+  family_name: string | null
+  given_name: string | null
+  name_zh: string | null
+  orcid: string
+  institution: string | null
+  homepage: string | null
+  email: string | null
+  /** JSON-encoded `{area, confidence, evidence}[]`. */
+  research_areas: string | null
+  /** JSON-encoded string array of name variants. */
+  aliases: string | null
+  disambiguation_notes: string | null
+  plan_id: string | null
+  notes: string | null
+  status: ResearcherProfileStatus
+  created_at: string
+  updated_at: string
+}
+
+/** Fields a caller supplies for a researcher-profile upsert. */
+export type ResearcherProfileInput = Partial<Omit<ResearcherProfileRecord, 'created_at' | 'updated_at'>>
+  & Pick<ResearcherProfileRecord, 'id' | 'display_name' | 'orcid'>
