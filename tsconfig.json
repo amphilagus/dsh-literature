@@ -1,0 +1,16 @@
+{
+  "extends": "../../../dc-harness/deepseek-harness/tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    // Override the inherited source-level paths: this out-of-tree package
+    // consumes @deepseek-ai/* through the node_modules symlinks created by
+    // scripts/link-dsh.sh (built lib/types declarations), never by pulling
+    // the DSH checkout's source into this program.
+    "paths": {}
+  },
+  "include": [
+    "src",
+    "tests",
+    "vitest.config.ts"
+  ]
+}
