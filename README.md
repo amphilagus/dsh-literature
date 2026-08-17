@@ -4,9 +4,10 @@ DeepSeek Harness 的文献检索与定向跟踪包。标准编码 Agent 默认**
 
 能做的事：
 
-- 用 Crossref + 本地 SQLite 搜论文，按 DOI 取详情
-- 跟踪一个研究主题（可配期刊 ISSN 白名单）或一个研究者（必须 ORCID）
-- 同时搜 Crossref 和 arXiv，自动去掉该方向已经入藏的文献，再人工筛查分级入库
+- 用 Crossref 搜论文；`sources=local` 搜的是**全局新库**（筛查后入藏的馆藏），不是远程命中的过渡缓存
+- 按 DOI 取详情：先查新库，没有再走 Crossref（远程结果只进缓存，不进新库）
+- 跟踪一个研究主题（可配期刊 ISSN 白名单）或一个研究者（必须 ORCID）；研究者身份放在跨会话的 researcher profile 里
+- 同时搜 Crossref 和 arXiv，命中先写入最多 2000 行的搜索缓存；已在全局新库里的 unique_id（DOI 或 `arxiv:...`）自动去掉，再人工筛查、`tracking_curate` 拷进新库
 - 查自带的 SCI 期刊目录（约 9500 种刊：刊名、print ISSN / eISSN、影响因子、中科院分区），给白名单挑 ISSN
 - 用 DSH 的 schedule 做会话本地的定期提醒（到点跑一次跟踪搜索）
 
@@ -21,7 +22,7 @@ DeepSeek Harness 的文献检索与定向跟踪包。标准编码 Agent 默认**
 
 只装插件、不装 preset：工具全部关闭，picker 里也没有「文献跟踪助理」。只装 preset、不装插件：preset 里的 `@amphilagus/dsh-literature` 行解析失败，会话起不来。
 
-**技能不用单独放置。** `literature-tracking-setup` 和 `literature-tracking-search` 是插件在 `enabled: true` 时用 `ctx.skills.register` 注册的运行时技能，不是 `~/.dsh/skills` 里的文件。不要把它们拷进 skills 目录。选中本 preset 后，agent 用自带的 `skill` 工具加载即可。
+**技能不用单独放置。** `literature-survey`、`literature-tracking-setup` 和 `literature-tracking-search` 是插件在 `enabled: true` 时用 `ctx.skills.register` 注册的运行时技能，不是 `~/.dsh/skills` 里的文件。不要把它们拷进 skills 目录。选中本 preset 后，agent 用自带的 `skill` 工具加载即可。
 
 ## 部署
 
@@ -91,9 +92,9 @@ dsh --profile web
 ```
 
 1. 新建会话，选「文献跟踪助理」。
-2. 应能看到 `literature_search` / `literature_get` / `literature_db` / `tracking_*` / `schedule_create` / `schedule_list` / `schedule_delete`。
+2. 应能看到 `literature_search` / `literature_get` / `literature_db` / `tracking_*` / `researcher_profile_*` / `schedule_create` / `schedule_list` / `schedule_delete`。
 3. `literature_db` 的 `action: journals` 按刊名、ISSN 或学科（如「物理」）能返回目录里的刊。
-4. `skill` 列表里应有 `literature-tracking-setup`、`literature-tracking-search`。
+4. `skill` 列表里应有 `literature-survey`、`literature-tracking-setup`、`literature-tracking-search`。
 5. 另开一个标准模式会话：上述文献工具和 schedule 工具都不应出现。
 
 ## 数据落在哪
@@ -101,9 +102,11 @@ dsh --profile web
 首次在文献跟踪助理会话里启用插件后：
 
 ```
-$DSH_HOME/data/literature/literature.db      # 论文库 + 跟踪方案 / 新库 / 搜索记录
+$DSH_HOME/data/literature/literature.db      # 搜索缓存 + 全局新库 + 跟踪方案 / 档案 / 搜索记录
 $DSH_HOME/data/literature/sci_journals.db    # 从本仓库 data/sci_journals.db 拷出的 SCI 目录
 ```
+
+同一文件里两张文献表职责不同：`papers` 是远程搜索的过渡缓存（上限 2000 行，按 `updated_at` 淘汰），agent 本地查的是 `library_papers`（全局新库，主题和研究者筛完都进这里）。`literature_db` 的 import / search / get / delete 打新库；`stats` 同时报 `libraryCount` 和 `cacheCount`。
 
 有 `sandboxPolicy.grant` 的 DSH 会把这个目录登记为额外可写根，bash/fs 才能碰 backup 和 export。没有 `grant` 的旧版 DSH 插件仍能加载，只是 shell 可能写不进去；文献工具本身不走 sandbox。
 
@@ -127,18 +130,22 @@ $DSH_HOME/data/literature/sci_journals.db    # 从本仓库 data/sci_journals.db
 |---|---|---|
 | `enabled` | host 上 `false`；本 preset 必须 `true` | 主开关 |
 | `mailto` | 空 | Crossref 礼貌池邮箱 |
-| `dbPath` | `$DSH_HOME/data/literature/literature.db` | 论文库路径 |
-| `cacheRemote` | `true` | 是否把远程命中写入本地库 |
+| `dbPath` | `$DSH_HOME/data/literature/literature.db` | SQLite 路径（缓存 + 新库 + 方案） |
+| `cacheRemote` | `true` | 是否把远程命中写入搜索缓存（不是新库） |
 | `sciJournalsPath` | 包内 `data/sci_journals.db` | SCI 目录路径 |
 
 改完 preset 文件后新开的会话才会用新组合；已在跑的会话保持启动时那一版。
 
 ## 跟踪怎么用
 
-1. 加载技能 `literature-tracking-setup`：定方向 → `literature_db` `journals` 挑 ISSN → `tracking_plan_add` → `schedule_create`。
-2. 提醒到期（或你手动要求跑一次）时加载 `literature-tracking-search`：`tracking_search` → 人工分级 → `tracking_curate` → `tracking_log_complete`（`status=done` 才算完成）→ 按周期再 `schedule_create`。
+一次性课题综述加载 `literature-survey`（`literature_search`，筛完 `tracking_curate` 进全局新库；不建方案、不排班）。
 
-`schedule_create` 的周期是 `every_seconds`（最小 300 秒），不是日历「每周一 9 点」。`prompt` 里写明要执行的方向名和技能名，否则到期后模型不知道该干什么。
+定期跟踪：
+
+1. 加载技能 `literature-tracking-setup`：定方向 → person 先消歧建档 → `literature_db` `journals` 挑 ISSN → `tracking_plan_add`。若返回 `possible_duplicate`，把该 kind 的现有名单给用户确认后再带 `confirm=true` 调一次 → `schedule_create`（默认 `every`）。
+2. 提醒到期（或你手动要求跑一次）时加载 `literature-tracking-search`：`tracking_search` → 人工分级 → `tracking_curate`（拷进**全局**新库，`plan` 只是来源备注）→ `tracking_log_complete`（`status=done` 才算完成）。默认 `every` 会自己反复触发，**不要**再 `schedule_create`。
+
+`schedule_create` 的周期是 `every_seconds`（最小 300 秒），不是日历「每周一 9 点」。`prompt` 里写明要执行的方向名和技能名，否则到期后模型不知道该干什么。删除方案只删搜索记录与排班，全局新库和研究者档案保留。
 
 ## 开发
 
