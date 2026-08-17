@@ -167,3 +167,7 @@ pnpm run build
 ```
 
 测试不访问网络。Crossref / arXiv 在单测里用 stub。
+
+## License
+
+[MIT](LICENSE)
