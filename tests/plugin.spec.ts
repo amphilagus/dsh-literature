@@ -14,9 +14,12 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
+import { CallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import * as literature from '../src/index.ts'
+
+const testToolSignal = new AbortController().signal
 
 function fakeExec(overrides: Record<string, unknown> = {}): ToolRunContext {
   return {
@@ -157,6 +160,57 @@ describe('literature plugin', () => {
     expect(ctx.literature).toBeDefined()
     expect(ctx.tools.get('literature_search')).toBeDefined()
     expect(ctx.tools.get('tracking_search')).toBeDefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('renders tracking_plan_add/list canonical values, not the call arguments', async () => {
+    const { dbPath } = tmpDb()
+    const ctx = await harness(dbPath)
+    const addArgs = {
+      name: 'Jinglai Duan',
+      kind: 'person' as const,
+      orcid: '0000-0002-9019-5088',
+      time_window_days: 3,
+      search_interval_days: 1,
+      notes: '段敬来',
+    }
+    const added = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('plan-add'),
+      name: 'tracking_plan_add',
+      arguments: addArgs,
+    })
+    expect(added.isError).toBe(false)
+    if (added.isError) return
+    expect(added.value).toMatchObject({
+      id: 'plan-jinglai-duan',
+      name: 'Jinglai Duan',
+      kind: 'person',
+      orcid: '0000-0002-9019-5088',
+      journal_whitelist: null,
+      time_window_days: 3,
+      search_interval_days: 1,
+      enabled: 1,
+      notes: '段敬来',
+    })
+    expect(added.content).toEqual([{ type: 'text', text: JSON.stringify(added.value) }])
+    expect(JSON.parse((added.content[0] as { text: string }).text)).toHaveProperty('id', 'plan-jinglai-duan')
+    expect(JSON.parse((added.content[0] as { text: string }).text)).not.toEqual(addArgs)
+
+    const listed = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('plan-list'),
+      name: 'tracking_plan_list',
+      arguments: {},
+    })
+    expect(listed.isError).toBe(false)
+    if (listed.isError) return
+    expect(listed.value).toMatchObject({
+      ok: true,
+      plans: [expect.objectContaining({ id: 'plan-jinglai-duan', enabled: 1 })],
+    })
+    expect(listed.content).toEqual([{ type: 'text', text: JSON.stringify(listed.value) }])
+    expect(JSON.parse((listed.content[0] as { text: string }).text)).not.toEqual({})
     await ctx.fiber.dispose()
   })
 

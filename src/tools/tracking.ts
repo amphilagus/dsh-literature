@@ -7,7 +7,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { CurationRelevance, SearchFinding } from '../db/types.ts'
 import { normalizeCandidateId } from '../engine/tracking-engine.ts'
@@ -33,11 +32,6 @@ function messageOf(error: unknown): string {
 
 function asError(error: unknown): { ok: false; code: string; message: string } {
   return { ok: false, code: 'internal_error', message: messageOf(error) }
-}
-
-/** Compact readable digest for native mode; raw JSON stays canonical. */
-function renderValue(value: unknown): ContentBlock[] {
-  return renderJsonValue(undefined, value)
 }
 
 // -------------------------------------------------------------- plan add
@@ -105,7 +99,7 @@ export function registerTrackingPlanAddTool(ctx: Context, service: LiteratureSer
         description: 'Optional notes, e.g. English search keywords or screening criteria.',
       },
     },
-    output: { schema: { oneOf: [PLAN_SCHEMA, ERROR_SCHEMA] } as const, render: renderValue },
+    output: { schema: { oneOf: [PLAN_SCHEMA, ERROR_SCHEMA] } as const, render: renderJsonValue },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
     async execute(args, _exec) {
@@ -175,7 +169,7 @@ export function registerTrackingPlanListTool(ctx: Context, service: LiteratureSe
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
@@ -223,7 +217,7 @@ export function registerTrackingPlanRemoveTool(ctx: Context, service: Literature
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
@@ -297,7 +291,7 @@ export function registerTrackingSearchTool(ctx: Context, service: LiteratureServ
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 90_000,
     isConcurrencySafe: () => true,
@@ -386,7 +380,7 @@ export function registerTrackingCurateTool(ctx: Context, service: LiteratureServ
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
@@ -466,7 +460,7 @@ export function registerTrackingLogCompleteTool(ctx: Context, service: Literatur
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
@@ -518,7 +512,7 @@ export function registerTrackingCuratedListTool(ctx: Context, service: Literatur
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
@@ -595,7 +589,7 @@ export function registerTrackingLogListTool(ctx: Context, service: LiteratureSer
           ERROR_SCHEMA,
         ],
       } as const,
-      render: renderValue,
+      render: renderJsonValue,
     },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
