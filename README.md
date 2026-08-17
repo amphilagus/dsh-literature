@@ -1,17 +1,28 @@
 # @amphilagus/dsh-literature
 
-DeepSeek Harness 的文献检索与定向跟踪包。标准编码 Agent 默认**看不到**这些工具；只有选中 **文献跟踪助理** preset 的会话才会启用。
+DeepSeek Harness 的文献检索与定向跟踪插件，配套 agent preset **文献跟踪助理**。标准编码 Agent 默认不加载本工具集，只有选中该 preset 的会话才会启用。
 
-能做的事：
+能力范围：
 
-- 用 Crossref 搜论文；`sources=local` 搜的是**全局新库**（筛查后入藏的馆藏），不是远程命中的过渡缓存
-- 按 DOI 取详情：先查新库，没有再走 Crossref（远程结果只进缓存，不进新库）
-- 跟踪一个研究主题（可配期刊 ISSN 白名单）或一个研究者（必须 ORCID）；研究者身份放在跨会话的 researcher profile 里
-- 同时搜 Crossref 和 arXiv，命中先写入最多 2000 行的搜索缓存；已在全局新库里的 unique_id（DOI 或 `arxiv:...`）自动去掉，再人工筛查、`tracking_curate` 拷进新库
-- 查自带的 SCI 期刊目录（约 9500 种刊：刊名、print ISSN / eISSN、影响因子、中科院分区），给白名单挑 ISSN
-- 用 DSH 的 schedule 做会话本地的定期提醒（到点跑一次跟踪搜索）
+- **检索**：Crossref 远程搜索；本地查询只打已筛查入藏的全局新库。DOI 详情先查新库，未入藏再走 Crossref。
+- **跟踪**：按研究主题（可选 ISSN 白名单）或研究者（必须 ORCID）定期检索 Crossref 与 arXiv，人工分级后写入全局新库。
+- **辅助**：SCI 期刊目录（刊名、ISSN、影响因子、中科院分区）、跨会话研究者档案、会话本地的到期提醒。
 
-不能做的事：不爬 PDF、不翻译全文、不替代日历闹钟或外部推送。提醒只在**当前会话进程还活着**时触发；关掉期间不响，再打开会补发逾期任务。
+不做全文抓取或翻译。提醒只在当前会话进程存活时触发；关闭期间不响，重开后补发逾期任务。
+
+## 用法
+
+在 **文献跟踪助理** 会话里直接说需求即可；agent 按下面三条路径选技能。
+
+1. **搜索某主题最近的文章**  
+   加载 `literature-survey`。`literature_search` 带主题关键词和 `recentDays`（近一周=7，近一月=30）。筛完用 `tracking_curate` 写入全局新库。不建跟踪方案、不排班。
+
+2. **搜索某研究者**  
+   加载 `literature-survey`。已有 ORCID 则 `literature_search` 带 `orcid`；只有姓名时先 `researcher_profile_disambiguate`，确认身份后再搜。同样可按 `recentDays` 限制窗口。筛完入全局新库。不建方案、不排班。
+
+3. **对研究者或主题持续跟踪，定时自动汇报**  
+   加载 `literature-tracking-setup`：确认 topic / person →（person 先消歧建档）→ 主题可配 ISSN 白名单 → `tracking_plan_add` → `schedule_create`。  
+   到期后加载 `literature-tracking-search`：双源检索 → 人工分级 → 入全局新库 → `tracking_log_complete` 后汇报。默认周期提醒会自己反复触发。提醒只在本会话进程存活时响；关掉期间不触发，重开后补发逾期任务。
 
 ## 两件东西，分别安装
 
@@ -136,16 +147,14 @@ $DSH_HOME/data/literature/sci_journals.db    # 从本仓库 data/sci_journals.db
 
 改完 preset 文件后新开的会话才会用新组合；已在跑的会话保持启动时那一版。
 
-## 跟踪怎么用
+## 跟踪流程
 
-一次性课题综述加载 `literature-survey`（`literature_search`，筛完 `tracking_curate` 进全局新库；不建方案、不排班）。
+第 3 种用法的工具顺序：
 
-定期跟踪：
+1. `literature-tracking-setup`：定方向 → person 先消歧建档 → `literature_db` `journals` 挑 ISSN → `tracking_plan_add`。若返回 `possible_duplicate`，把该 kind 的现有名单给用户确认后再带 `confirm=true` 调一次 → `schedule_create`（默认 `every`）。
+2. 提醒到期（或手动要求跑一次）时 `literature-tracking-search`：`tracking_search` → 人工分级 → `tracking_curate`（`plan` 只是来源备注）→ `tracking_log_complete`（`status=done` 才算完成）。默认 `every` 会自己反复触发，**不要**再 `schedule_create`。
 
-1. 加载技能 `literature-tracking-setup`：定方向 → person 先消歧建档 → `literature_db` `journals` 挑 ISSN → `tracking_plan_add`。若返回 `possible_duplicate`，把该 kind 的现有名单给用户确认后再带 `confirm=true` 调一次 → `schedule_create`（默认 `every`）。
-2. 提醒到期（或你手动要求跑一次）时加载 `literature-tracking-search`：`tracking_search` → 人工分级 → `tracking_curate`（拷进**全局**新库，`plan` 只是来源备注）→ `tracking_log_complete`（`status=done` 才算完成）。默认 `every` 会自己反复触发，**不要**再 `schedule_create`。
-
-`schedule_create` 的周期是 `every_seconds`（最小 300 秒），不是日历「每周一 9 点」。`prompt` 里写明要执行的方向名和技能名，否则到期后模型不知道该干什么。删除方案只删搜索记录与排班，全局新库和研究者档案保留。
+`schedule_create` 的周期是 `every_seconds`（最小 300 秒），不是日历「每周一 9 点」。`prompt` 里写明要执行的方向名和技能名。删除方案只删搜索记录与排班，全局新库和研究者档案保留。
 
 ## 开发
 
