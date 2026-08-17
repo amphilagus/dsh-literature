@@ -1,7 +1,6 @@
 /**
- * Literature-tracking tests: plan CRUD, curated-library dedupe semantics
- * (same direction unique, cross-direction allowed), search-log lifecycle,
- * and the candidate-id normalization helpers.
+ * Literature-tracking tests: plan CRUD, global-library dedupe, search-log
+ * lifecycle, and the candidate-id normalization helpers.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -12,6 +11,7 @@ import { LiteratureDatabase } from '../src/db/database.ts'
 import type { ArxivSearchApi } from '../src/engine/arxiv.ts'
 import type { CrossrefSearchApi, CrossrefWork, SearchWorksParams } from '../src/engine/crossref.ts'
 import { normalizeCandidateId, TrackingSearchEngine } from '../src/engine/tracking-engine.ts'
+import { planNamesSimilar } from '../src/tools/tracking.ts'
 
 const cleanups: (() => void)[] = []
 const tmpDb = (): string => {
@@ -60,35 +60,30 @@ describe('tracking plan CRUD', () => {
 })
 
 describe('curated library dedupe semantics', () => {
-  it('curates one paper per direction but allows the same paper across directions', () => {
+  it('stores one global library row per unique_id across topic and person plans', () => {
     const db = seededDb()
     db.upsertTrackingPlan({ id: 'plan-a', name: 'Direction A', kind: 'topic' })
     db.upsertTrackingPlan({ id: 'plan-xiaoming', name: 'Xiaoming', kind: 'person', orcid: '0000-0002-0000-0001' })
 
-    // Direction A curates paper B at very_high.
-    const first = db.curatePaper('plan-a', '10.1000/paper-b', 'very_high', 'first author, exact match')
+    const first = db.curateFromCache('10.1000/paper-b', 'very_high', 'first author, exact match', 'plan-a')
     expect(first).not.toBeNull()
-    // Same direction repeat -> null (first-pass dedupe foundation).
-    expect(db.curatePaper('plan-a', '10.1000/paper-b', 'high', 'repeat')).toBeNull()
-    // Cross-direction (Xiaoming) -> allowed, graded medium for non-first/corresponding author.
-    const second = db.curatePaper('plan-xiaoming', '10.1000/paper-b', 'medium', 'not first/corresponding author')
-    expect(second).not.toBeNull()
-    expect(second?.relevance).toBe('medium')
+    expect(db.curateFromCache('10.1000/paper-b', 'high', 'repeat', 'plan-a')).toBeNull()
+    expect(db.curateFromCache('10.1000/paper-b', 'medium', 'not first/corresponding author', 'plan-xiaoming')).toBeNull()
 
-    expect(db.curatedUniqueIds('plan-a')).toEqual(new Set(['10.1000/paper-b']))
-    expect(db.curatedUniqueIds('plan-xiaoming')).toEqual(new Set(['10.1000/paper-b']))
-    expect(db.listCuratedPapers('plan-a')).toHaveLength(1)
-    expect(db.listCuratedPapers('plan-a')[0]?.title).toBe('Paper B')
-    expect(db.countCuratedPapers()).toBe(2)
+    expect(db.libraryUniqueIds()).toEqual(new Set(['10.1000/paper-b']))
+    expect(db.listLibraryPapers()).toHaveLength(1)
+    expect(db.listLibraryPapers()[0]?.title).toBe('Paper B')
+    expect(db.countLibraryPapers()).toBe(1)
+    expect(db.getPaper('10.1000/paper-b')).toBeNull()
     db.close()
   })
 
-  it('supports arxiv: unique ids as curated keys', () => {
+  it('supports arxiv: unique ids as library keys', () => {
     const db = seededDb()
     db.upsertTrackingPlan({ id: 'plan-t', name: 'Tracks', kind: 'topic' })
-    const created = db.curatePaper('plan-t', 'arxiv:2607.01016', 'very_high', null)
+    const created = db.curateFromCache('arxiv:2607.01016', 'very_high', null, 'plan-t')
     expect(created).not.toBeNull()
-    expect(db.listCuratedPapers('plan-t')[0]?.title).toBe('Track theory in Al2O3')
+    expect(db.listLibraryPapers()[0]?.title).toBe('Track theory in Al2O3')
     db.close()
   })
 })
@@ -113,13 +108,14 @@ describe('search log lifecycle', () => {
     db.close()
   })
 
-  it('cascades logs and curated entries when a plan is removed', () => {
+  it('keeps library rows when a plan is removed; search logs still cascade', () => {
     const db = seededDb()
     db.upsertTrackingPlan({ id: 'plan-a', name: 'Direction A', kind: 'topic' })
-    db.curatePaper('plan-a', '10.1000/paper-b', 'high', null)
+    db.curateFromCache('10.1000/paper-b', 'high', null, 'plan-a')
     db.startSearchLog('plan-a', '2026-08-10', '2026-08-17')
     db.deleteTrackingPlan('plan-a')
-    expect(db.countCuratedPapers()).toBe(0)
+    expect(db.countLibraryPapers()).toBe(1)
+    expect(db.getLibraryPaper('10.1000/paper-b')?.source_plan_id).toBeNull()
     expect(db.listSearchLogs('plan-a')).toHaveLength(0)
     db.close()
   })
@@ -132,6 +128,14 @@ describe('candidate id normalization', () => {
     expect(normalizeCandidateId('2607.01016v2')).toBe('arxiv:2607.01016')
     expect(normalizeCandidateId('https://arxiv.org/abs/2607.01016')).toBe('arxiv:2607.01016')
     expect(normalizeCandidateId('nonsense')).toBeNull()
+  })
+})
+
+describe('plan name similarity', () => {
+  it('treats equal and mutually contained names as similar', () => {
+    expect(planNamesSimilar('CRISPR', 'crispr')).toBe(true)
+    expect(planNamesSimilar('CRISPR gene editing', 'CRISPR')).toBe(true)
+    expect(planNamesSimilar('ion track', 'SHI irradiation')).toBe(false)
   })
 })
 
@@ -206,6 +210,33 @@ describe('tracking Crossref search paths', () => {
     expect(captured?.filter).toContain('orcid:0000-0001-9041-1468')
     expect(captured?.filter).toMatch(/from-pub-date:\d{4}-\d{2}-\d{2}/)
     expect(captured?.filter).toMatch(/until-pub-date:\d{4}-\d{2}-\d{2}/)
+    db.close()
+  })
+
+  it('excludes hits already present in the global library', async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const [year, month, day] = today.split('-').map(Number)
+    const crossref: CrossrefSearchApi = {
+      async searchWorks() {
+        return {
+          works: [work({ DOI: '10.1000/new', title: 'New topic', published: { 'date-parts': [[year, month, day]] } })],
+          total: 1,
+        }
+      },
+      async getWork() {
+        return null
+      },
+    }
+    const db = seededDb()
+    db.upsertTrackingPlan({ id: 'plan-topic', name: 'crispr', kind: 'topic', time_window_days: 7 })
+    db.upsertPaper({ doi: '10.1000/new', title: 'New topic', year, source: 'crossref' })
+    db.curateFromCache('10.1000/new', 'high', null, 'plan-topic')
+    const plan = db.getTrackingPlan('plan-topic')
+    if (plan === null) throw new Error('expected plan')
+    const engine = new TrackingSearchEngine(db, crossref, emptyArxiv, { cacheRemote: false })
+    const outcome = await engine.searchPlan(plan)
+    expect(outcome.candidates).toEqual([])
+    expect(outcome.excluded_already_curated).toEqual([{ unique_id: '10.1000/new', title: 'New topic' }])
     db.close()
   })
 })

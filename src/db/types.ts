@@ -77,7 +77,12 @@ export interface DatabaseStats {
   dbPath: string
   sizeBytes: number
   schemaVersion: number
+  /** Rows in the papers search cache (alias of {@link cacheCount}). */
   paperCount: number
+  /** Rows in the papers search cache. */
+  cacheCount: number
+  /** Rows in the global curated library. */
+  libraryCount: number
   journalCount: number
   earliestYear: number | null
   latestYear: number | null
@@ -124,24 +129,47 @@ export interface TrackingPlanRecord {
 export type TrackingPlanInput = Partial<Omit<TrackingPlanRecord, 'created_at' | 'updated_at'>>
   & Pick<TrackingPlanRecord, 'name' | 'kind'>
 
-/** One curated entry of the new direction library (新库). */
+/** One curated entry of the global library (新库). */
+export interface LibraryPaperRecord {
+  unique_id: string
+  title: string
+  authors: string
+  journal: string | null
+  issn: string | null
+  eissn: string | null
+  publication_date: string | null
+  year: number | null
+  abstract: string | null
+  url: string | null
+  source: string
+  is_open_access: number
+  citation_count: number
+  impact_factor: number | null
+  cas_partition: number | null
+  is_sci: number
+  relevance: CurationRelevance
+  note: string | null
+  source_plan_id: string | null
+  added_at: string
+  updated_at: string
+}
+
+/** Fields a caller supplies to upsert directly into the library. */
+export type LibraryPaperInput = Partial<LibraryPaperRecord>
+  & Pick<LibraryPaperRecord, 'unique_id' | 'title' | 'relevance'>
+
+/** @deprecated v3 per-plan pointer; kept for public type compatibility. */
 export interface CuratedPaperRecord {
   id: number
   plan_id: string
-  /** Canonical DOI or `arxiv:xxxx.xxxxx` id (the cross-source unique key). */
   unique_id: string
   relevance: CurationRelevance
   note: string | null
   added_at: string
 }
 
-/** Curated entry joined with its source paper (title/journal/url). */
-export interface CuratedPaperView extends CuratedPaperRecord {
-  title: string | null
-  journal: string | null
-  url: string | null
-  publication_date: string | null
-}
+/** Library row projected for list tools. */
+export type CuratedPaperView = LibraryPaperRecord
 
 /** One finding reported by the agent when closing a search log. */
 export interface SearchFinding {

@@ -1,6 +1,6 @@
 /**
- * The `literature_search` tool: search scientific literature across the local
- * database and Crossref, merged by DOI.
+ * The `literature_search` tool: search scientific literature across the curated
+ * library and Crossref, merged by DOI.
  * @module @amphilagus/dsh-literature/tools/search
  */
 
@@ -15,11 +15,12 @@ import { ERROR_SCHEMA, PAPER_SCHEMA } from './schemas.ts'
 export const LITERATURE_SEARCH_TOOL_NAME = 'literature_search'
 
 const SEARCH_DESCRIPTION =
-  'Search scientific literature for research papers. Queries run against the local literature database '
-  + '(full-text search over title/abstract/journal/authors, filled by previous searches and imports) and '
-  + 'the Crossref scholarly API, merged and deduplicated by DOI. Optional orcid restricts results to one '
-  + 'researcher; optional recentDays keeps only papers from the last N days. Use fromYear/toYear for a '
-  + 'calendar-year range, not a last-N-days window. Follow up with literature_get for a specific DOI.'
+  'Search scientific literature for research papers. Local queries (`sources=local` or `both`) search the '
+  + 'curated library (full-text over title/abstract/journal/authors), not the remote-search cache. Remote '
+  + 'queries use the Crossref scholarly API; those hits are staged in a cache until tracking_curate copies '
+  + 'them into the library. Optional orcid restricts results to one researcher; optional recentDays keeps '
+  + 'only papers from the last N days. Use fromYear/toYear for a calendar-year range, not a last-N-days '
+  + 'window. Follow up with literature_get for a specific DOI.'
 
 const SEARCH_SUCCESS_SCHEMA = {
   type: 'object',
@@ -89,7 +90,7 @@ export function registerLiteratureSearchTool(ctx: Context, service: LiteratureSe
       sources: {
         type: 'string',
         enum: ['local', 'crossref', 'both'],
-        description: 'Which backends to consult: the local literature database, the Crossref API, or both. Defaults to "both".',
+        description: 'Which backends to consult: the curated library (`local`), the Crossref API, or both. Defaults to "both". Local does not search the remote-search cache.',
       },
       fromYear: { type: 'integer', description: 'Only papers published in this calendar year or later. Not a last-N-days filter; use recentDays for that.' },
       toYear: { type: 'integer', description: 'Only papers published in this calendar year or earlier. Not a last-N-days filter; use recentDays for that.' },

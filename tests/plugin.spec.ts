@@ -87,10 +87,17 @@ describe('literature plugin', () => {
     const { dbPath } = tmpDb()
     const ctx = await harness(dbPath)
     ctx.literature.db.upsertPaper({
-      doi: '10.1000/compose',
+      doi: '10.1000/compose-cache',
+      title: 'Composition cache only',
+      authors: JSON.stringify(['Composer']),
+      year: 2021,
+    })
+    ctx.literature.db.upsertLibraryPaper({
+      unique_id: '10.1000/compose',
       title: 'Composition search hit',
       authors: JSON.stringify(['Composer']),
       year: 2021,
+      relevance: 'high',
     })
     const tool = ctx.tools.get('literature_search') as ToolDefinition
     const value = await tool.execute(
@@ -106,7 +113,8 @@ describe('literature plugin', () => {
   it('executes literature_get with a cached hit and literature_db stats', async () => {
     const { dbPath } = tmpDb()
     const ctx = await harness(dbPath)
-    ctx.literature.db.upsertPaper({ doi: '10.1000/cached', title: 'Cached paper', year: 2020 })
+    ctx.literature.db.upsertLibraryPaper({ unique_id: '10.1000/cached', title: 'Cached paper', year: 2020, relevance: 'high' })
+    ctx.literature.db.upsertPaper({ doi: '10.1000/cache-only', title: 'Cache only', year: 2020 })
 
     const getTool = ctx.tools.get('literature_get') as ToolDefinition
     const got = await getTool.execute(
@@ -119,8 +127,8 @@ describe('literature plugin', () => {
     const stats = await dbTool.execute(
       { action: 'stats' },
       fakeExec({ name: 'literature_db' }),
-    ) as { ok: boolean; action: string; paperCount: number }
-    expect(stats).toMatchObject({ ok: true, action: 'stats', paperCount: 1 })
+    ) as { ok: boolean; action: string; paperCount: number; cacheCount: number; libraryCount: number }
+    expect(stats).toMatchObject({ ok: true, action: 'stats', paperCount: 1, cacheCount: 1, libraryCount: 1 })
 
     const journals = await dbTool.execute(
       { action: 'journals', query: '0168-583X' },
@@ -223,6 +231,46 @@ describe('literature plugin', () => {
     })
     expect(listed.content).toEqual([{ type: 'text', text: JSON.stringify(listed.value) }])
     expect(JSON.parse((listed.content[0] as { text: string }).text)).not.toEqual({})
+    await ctx.fiber.dispose()
+  })
+
+  it('returns possible_duplicate for a similar tracking plan name until confirm=true', async () => {
+    const { dbPath } = tmpDb()
+    const ctx = await harness(dbPath)
+    const first = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('plan-add-first'),
+      name: 'tracking_plan_add',
+      arguments: { name: 'CRISPR', kind: 'topic' },
+    })
+    expect(first.isError).toBe(false)
+    if (first.isError) return
+    expect(first.value).toMatchObject({ id: 'plan-crispr', name: 'CRISPR' })
+
+    const duplicate = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('plan-add-dup'),
+      name: 'tracking_plan_add',
+      arguments: { name: 'CRISPR gene editing', kind: 'topic' },
+    })
+    expect(duplicate.isError).toBe(false)
+    if (duplicate.isError) return
+    expect(duplicate.value).toMatchObject({
+      ok: false,
+      code: 'possible_duplicate',
+      existing: [expect.objectContaining({ name: 'CRISPR', kind: 'topic' })],
+    })
+    expect(ctx.literature.db.getTrackingPlan('CRISPR gene editing')).toBeNull()
+
+    const confirmed = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('plan-add-confirm'),
+      name: 'tracking_plan_add',
+      arguments: { name: 'CRISPR gene editing', kind: 'topic', confirm: true },
+    })
+    expect(confirmed.isError).toBe(false)
+    if (confirmed.isError) return
+    expect(confirmed.value).toMatchObject({ id: 'plan-crispr-gene-editing', name: 'CRISPR gene editing' })
     await ctx.fiber.dispose()
   })
 

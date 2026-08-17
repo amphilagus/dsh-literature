@@ -1,6 +1,7 @@
 /**
  * The `literature_get` tool: fetch full details for one paper by DOI, from
- * the local cache first and Crossref second (the fetch is stored back).
+ * the curated library first and Crossref second (the fetch is stored in the
+ * search cache, not the library).
  * @module @amphilagus/dsh-literature/tools/get
  */
 
@@ -15,10 +16,11 @@ import { PAPER_SCHEMA } from './schemas.ts'
 export const LITERATURE_GET_TOOL_NAME = 'literature_get'
 
 const GET_DESCRIPTION =
-  'Fetch full details for one scientific paper by DOI, from the local literature database when cached, '
-  'otherwise from the Crossref API (the fetch is stored into the local database). Returns title, authors, '
-  'journal, year, abstract, URL, open-access status, and citation count. Use after literature_search when '
-  'a result needs its complete record.'
+  'Fetch full details for one scientific paper by DOI, from the curated library when present, '
+  + 'otherwise from the Crossref API (the fetch is stored into the search cache, not the library). Returns '
+  + 'title, authors, journal, year, abstract, URL, open-access status, and citation count. Use after '
+  + 'literature_search when a result needs its complete record. Screening a hit into the library is '
+  + 'tracking_curate, not this tool.'
 
 const GET_SUCCESS_SCHEMA = {
   type: 'object',
@@ -61,7 +63,7 @@ function isGetSuccess(value: unknown): value is GetSuccessValue {
 
 function renderGetValue(_args: unknown, value: unknown): ContentBlock[] {
   if (!isGetSuccess(value)) return renderJsonValue(_args, value)
-  const text = `Literature details for ${value.paper.doi} (${value.cached ? 'from local database' : 'fetched from Crossref and stored'}):\n\n${digestPaper(value.paper, 1)}`
+  const text = `Literature details for ${value.paper.doi} (${value.cached ? 'from curated library' : 'fetched from Crossref and staged in the search cache'}):\n\n${digestPaper(value.paper, 1)}`
   return [{ type: 'text', text }]
 }
 
@@ -82,7 +84,7 @@ export function registerLiteratureGetTool(ctx: Context, service: LiteratureServi
       },
       forceRemote: {
         type: 'boolean',
-        description: 'Skip the local cache and always fetch from Crossref. Defaults to false.',
+        description: 'Skip the curated library and always fetch from Crossref. Defaults to false.',
       },
     },
     output: { schema: GET_OUTPUT_SCHEMA, render: renderGetValue },

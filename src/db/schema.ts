@@ -1,13 +1,12 @@
 /**
- * SQLite DDL for the literature database: papers, journals, an FTS5
- * full-text index over the searchable paper fields, sync triggers, and the
- * v2 literature-tracking tables (tracking plans, curated papers, search logs),
- * and the v3 researcher-profile table.
+ * SQLite DDL for the literature database: papers cache, journals, FTS5
+ * indexes, tracking plans, the v3 curated_papers table (kept for migration),
+ * the v4 global library, search logs, and researcher profiles.
  * @module @amphilagus/dsh-literature/db/schema
  */
 
 /** Current database schema version, recorded in the `meta` table. */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export const SCHEMA_DDL = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -115,6 +114,61 @@ export const SCHEMA_DDL = [
   )`,
 
   `CREATE INDEX IF NOT EXISTS idx_curated_plan ON curated_papers(plan_id)`,
+
+  // v4 全局新库: 筛查后的唯一馆藏. unique_id 主键; 主题与研究者入同一张表.
+  `CREATE TABLE IF NOT EXISTS library_papers (
+    unique_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    authors TEXT NOT NULL DEFAULT '[]',
+    journal TEXT,
+    issn TEXT,
+    eissn TEXT,
+    publication_date TEXT,
+    year INTEGER,
+    abstract TEXT,
+    url TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',
+    is_open_access INTEGER NOT NULL DEFAULT 0,
+    citation_count INTEGER NOT NULL DEFAULT 0,
+    impact_factor REAL,
+    cas_partition INTEGER,
+    is_sci INTEGER NOT NULL DEFAULT 0,
+    relevance TEXT NOT NULL CHECK (relevance IN ('very_high', 'high', 'medium', 'low')),
+    note TEXT,
+    source_plan_id TEXT REFERENCES tracking_plans(id) ON DELETE SET NULL,
+    added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_library_year ON library_papers(year)`,
+  `CREATE INDEX IF NOT EXISTS idx_library_source_plan ON library_papers(source_plan_id)`,
+
+  `CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
+    title,
+    abstract,
+    journal,
+    authors,
+    content = 'library_papers',
+    content_rowid = 'rowid',
+    tokenize = 'unicode61 remove_diacritics 2'
+  )`,
+
+  `CREATE TRIGGER IF NOT EXISTS library_ai AFTER INSERT ON library_papers BEGIN
+    INSERT INTO library_fts(rowid, title, abstract, journal, authors)
+    VALUES (new.rowid, new.title, COALESCE(new.abstract, ''), COALESCE(new.journal, ''), new.authors);
+  END`,
+
+  `CREATE TRIGGER IF NOT EXISTS library_ad AFTER DELETE ON library_papers BEGIN
+    INSERT INTO library_fts(library_fts, rowid, title, abstract, journal, authors)
+    VALUES ('delete', old.rowid, old.title, COALESCE(old.abstract, ''), COALESCE(old.journal, ''), old.authors);
+  END`,
+
+  `CREATE TRIGGER IF NOT EXISTS library_au AFTER UPDATE ON library_papers BEGIN
+    INSERT INTO library_fts(library_fts, rowid, title, abstract, journal, authors)
+    VALUES ('delete', old.rowid, old.title, COALESCE(old.abstract, ''), COALESCE(old.journal, ''), old.authors);
+    INSERT INTO library_fts(rowid, title, abstract, journal, authors)
+    VALUES (new.rowid, new.title, COALESCE(new.abstract, ''), COALESCE(new.journal, ''), new.authors);
+  END`,
 
   // 搜索记录表: 一次跟踪搜索任务的日志, 以 status='done' 为任务完成终点.
   `CREATE TABLE IF NOT EXISTS search_logs (

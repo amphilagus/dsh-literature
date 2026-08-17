@@ -1,8 +1,8 @@
 /**
  * Tracking search engine: runs one direction's configured search over
  * Crossref AND arXiv, applies the topic journal whitelist, caches every hit
- * into the legacy paper database, and performs the first-pass dedupe against
- * the direction's curated library. The screening agent then reads the
+ * into the papers search cache, and performs the first-pass dedupe against
+ * the global curated library. The screening agent then reads the
  * candidates and curates the matching ones through `tracking_curate`.
  * @module @amphilagus/dsh-literature/engine/tracking
  */
@@ -32,7 +32,7 @@ export interface TrackingCandidate {
   authors: string[]
 }
 
-/** A hit dropped by the first-pass dedupe (already curated for this plan). */
+/** A hit dropped by the first-pass dedupe (already in the global library). */
 export interface DedupedHit {
   unique_id: string
   title: string
@@ -46,7 +46,7 @@ export interface TrackingSearchOutcome {
   /** Search-log id for this run; complete it with `tracking_log_complete`. */
   log_id: number
   candidates: TrackingCandidate[]
-  /** Hits auto-filtered because this direction already curates them. */
+  /** Hits auto-filtered because they are already in the global library. */
   excluded_already_curated: DedupedHit[]
   warnings: string[]
 }
@@ -188,8 +188,8 @@ export class TrackingSearchEngine {
       warnings.push('arxiv author query empty for this plan name')
     }
 
-    // --- first-pass dedupe against THIS direction's curated library
-    const curated = this.db.curatedUniqueIds(plan.id)
+    // --- first-pass dedupe against the global library
+    const curated = this.db.libraryUniqueIds()
     const excluded: DedupedHit[] = []
     const candidates: TrackingCandidate[] = []
     for (const candidate of byId.values()) {

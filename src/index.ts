@@ -7,11 +7,11 @@
  *   (`$DSH_HOME/data/literature/literature.db`) and a merged Crossref search
  *   engine, granted as an extra sandbox writable root;
  * - `literature_search` — merged local + Crossref keyword search;
- * - `literature_get` — DOI lookup, local cache first;
+ * - `literature_get` — DOI lookup, curated library first;
  * - `literature_db` — database management (stats, import, backup, ...);
  * - literature tracking — tracking-plan table, dual-source (Crossref + arXiv)
- *   windowed tracking_search with first-pass dedupe, curated direction
- *   libraries, search logs, researcher profiles, and the screening/scheduling
+ *   windowed tracking_search with first-pass dedupe, a global curated
+ *   library, search logs, researcher profiles, and the screening/scheduling
  *   runtime skills.
  * @module @amphilagus/dsh-literature
  */
@@ -34,14 +34,14 @@ export type { LiteratureConfig } from './literature-service.ts'
 export { bundledSciJournalsPath, installSciJournalsCatalog, SciJournalCatalog } from './db/catalog.ts'
 export type { SciJournalHit, SciJournalSearchOptions } from './db/catalog.ts'
 export type { DatabaseStats, ImportResult, JournalInput, JournalRecord, PaperFilters, PaperInput, PaperRecord } from './db/types.ts'
-export type { CuratedPaperRecord, CuratedPaperView, CurationRelevance, SearchFinding, SearchLogRecord, TrackingPlanInput, TrackingPlanKind, TrackingPlanRecord, ResearcherProfileInput, ResearcherProfileRecord, ResearcherProfileStatus } from './db/types.ts'
+export type { CuratedPaperRecord, CuratedPaperView, CurationRelevance, LibraryPaperInput, LibraryPaperRecord, SearchFinding, SearchLogRecord, TrackingPlanInput, TrackingPlanKind, TrackingPlanRecord, ResearcherProfileInput, ResearcherProfileRecord, ResearcherProfileStatus } from './db/types.ts'
 export { CrossrefClient, CrossrefError, DEFAULT_CROSSREF_BASE_URL as CROSSREF_BASE_URL, normalizeDoi, stripJats, toPaperInput } from './engine/crossref.ts'
 export type { CrossrefClientOptions, CrossrefSearchApi, CrossrefSearchPage, CrossrefWork, SearchWorksParams } from './engine/crossref.ts'
 export { ArxivClient, ArxivError, DEFAULT_ARXIV_BASE_URL as ARXIV_BASE_URL, arxivAuthorQuery, arxivUniqueId, parseArxivEntry, toArxivPaperInput } from './engine/arxiv.ts'
 export type { ArxivClientOptions, ArxivEntry, ArxivSearchApi, ArxivSearchParams } from './engine/arxiv.ts'
 export { OrcidClient, OrcidError, DEFAULT_ORCID_BASE_URL as ORCID_BASE_URL, ORCID_PATTERN, normalizeOrcid, parseExpandedResults, profileIdFromOrcid } from './engine/orcid.ts'
 export type { OrcidCandidate, OrcidClientOptions, OrcidExpandedSearchParams } from './engine/orcid.ts'
-export { LiteratureSearchEngine, toHit, toHitFromWork } from './engine/engine.ts'
+export { LiteratureSearchEngine, toHit, toHitFromLibrary, toHitFromWork } from './engine/engine.ts'
 export type { LiteratureEngineOptions } from './engine/engine.ts'
 export { TrackingSearchEngine, normalizeCandidateId } from './engine/tracking-engine.ts'
 export type { DedupedHit, TrackingCandidate, TrackingEngineOptions, TrackingSearchOutcome } from './engine/tracking-engine.ts'
@@ -87,10 +87,12 @@ function tryGrantLiteratureDataRoot(ctx: Context, dataDir: string): void {
 
 const TOOL_GUIDANCE =
   'Use literature_search (query; optional orcid and recentDays), literature_get (DOI), and literature_db '
-  + '(stats/import/backup and SCI journals by title/ISSN/CAS). Prefer a local search for papers already stored; '
-  + 'remote Crossref is rate-limited. Use recentDays for last-N-day windows, not fromYear. '
-  + 'Tracking: tracking_plan_add/list/remove, tracking_search, tracking_curate, tracking_log_complete, '
-  + 'tracking_curated_list, tracking_log_list. '
+  + '(stats/import/backup and SCI journals by title/ISSN/CAS). sources=local searches the curated library, '
+  + 'not the remote-search cache. Prefer a local library search before Crossref; remote Crossref is rate-limited. '
+  + 'Use recentDays for last-N-day windows, not fromYear. '
+  + 'Tracking: tracking_plan_add/list/remove, tracking_search, tracking_curate (copies cache into the global library), '
+  + 'tracking_log_complete, tracking_curated_list, tracking_log_list. If tracking_plan_add returns possible_duplicate, '
+  + 'show the existing list and retry with confirm=true. '
   + 'Researcher identity: researcher_profile_disambiguate, researcher_profile_upsert, '
   + 'researcher_profile_query, researcher_profile_remove (档案跨会话存活; 建 person 方向前先消歧并建档). '
   + 'Load literature-survey for a one-off topic or author survey, literature-tracking-setup before configuring a direction, '
@@ -140,7 +142,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
   ctx.skills.register({
     name: SKILL_SURVEY,
-    description: 'One-off literature survey of a topic or author via literature_search (optional recentDays / orcid). Not a tracking plan.',
+    description: 'One-off literature survey of a topic or author via literature_search (optional recentDays / orcid). Screen into the global library with tracking_curate. Not a tracking plan.',
     source: 'runtime',
     content: SKILL_SURVEY_CONTENT,
   })

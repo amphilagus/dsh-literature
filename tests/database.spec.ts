@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { LiteratureDatabase } from '../src/db/database.ts'
-import type { PaperInput } from '../src/db/types.ts'
+import { LiteratureDatabase, PAPER_CACHE_LIMIT } from '../src/db/database.ts'
+import type { LibraryPaperInput, PaperInput } from '../src/db/types.ts'
 
 const openDb = (): { db: LiteratureDatabase; dir: string } => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-literature-db-'))
@@ -33,8 +33,10 @@ describe('LiteratureDatabase', () => {
   it('creates the file, dir, and schema on open', () => {
     const { db, dir } = useDb()
     expect(db.isOpen).toBe(true)
-    expect(db.stats().schemaVersion).toBe(3)
+    expect(db.stats().schemaVersion).toBe(4)
     expect(db.stats().paperCount).toBe(0)
+    expect(db.stats().cacheCount).toBe(0)
+    expect(db.stats().libraryCount).toBe(0)
     expect(db.stats().journalCount).toBe(0)
     expect(db.path.startsWith(dir)).toBe(true)
   })
@@ -125,20 +127,22 @@ describe('LiteratureDatabase', () => {
     ])
     expect(result.imported).toBe(1)
     expect(result.failed).toBe(2)
-    expect(db.countPapers()).toBe(1)
-    // Re-importing an existing DOI counts as skipped.
+    expect(db.countLibraryPapers()).toBe(1)
+    expect(db.countPapers()).toBe(0)
+    // Re-importing an existing unique id counts as skipped.
     const again = db.importPapers([paper({ doi: '10.1000/a', title: 'Imported A' })])
     expect(again.skipped).toBe(1)
   })
 
   it('backs up, exports, and vacuums', () => {
     const { db, dir } = useDb()
-    db.upsertPaper(paper({ doi: '10.1000/a', title: 'Exportable' }))
+    db.importPapers([paper({ doi: '10.1000/a', title: 'Exportable' })])
     const backupPath = db.backup(join(dir, 'backup.db'))
     expect(readFileSync(backupPath).length).toBeGreaterThan(0)
     const exported = db.exportToJson(join(dir, 'all.json'))
     expect(exported.count).toBe(1)
-    const document = JSON.parse(readFileSync(exported.path, 'utf8')) as { papers: unknown[]; journals: unknown[] }
+    const document = JSON.parse(readFileSync(exported.path, 'utf8')) as { library: unknown[]; papers: unknown[]; journals: unknown[] }
+    expect(document.library).toHaveLength(1)
     expect(document.papers).toHaveLength(1)
     expect(document.journals).toHaveLength(0)
     db.vacuum()
@@ -187,6 +191,101 @@ describe('LiteratureDatabase', () => {
     const { db } = useDb()
     db.upsertPaper(paper({ doi: '10.1000/a', title: 'Something' }))
     expect(db.searchPapers({ query: 'zzzz-no-match' })).toEqual([])
+  })
+
+  it(`prunes the papers cache down to ${PAPER_CACHE_LIMIT} oldest-updated rows`, () => {
+    const { db } = useDb()
+    for (let index = 0; index < PAPER_CACHE_LIMIT + 5; index += 1) {
+      db.upsertPaper(paper({ doi: `10.1000/cache-${index}`, title: `Cache ${index}` }))
+    }
+    expect(db.countPapers()).toBe(PAPER_CACHE_LIMIT)
+    expect(db.getPaper('10.1000/cache-0')).toBeNull()
+    expect(db.getPaper(`10.1000/cache-${PAPER_CACHE_LIMIT + 4}`)).not.toBeNull()
+  })
+
+  it('copies cache metadata into the library and keeps the title after the cache row is gone', () => {
+    const { db } = useDb()
+    db.upsertPaper(paper({
+      doi: '10.1000/lib',
+      title: 'Library title',
+      journal: 'Nature',
+      year: 2026,
+      abstract: 'kept',
+    }))
+    const created = db.curateFromCache('10.1000/lib', 'very_high', 'exact match', null)
+    expect(created?.title).toBe('Library title')
+    expect(db.getPaper('10.1000/lib')).toBeNull()
+    expect(db.getLibraryPaper('10.1000/lib')?.title).toBe('Library title')
+    expect(db.listLibraryPapers()[0]?.title).toBe('Library title')
+    expect(db.curateFromCache('10.1000/lib', 'high', 'repeat')).toBeNull()
+  })
+
+  it('searches the library FTS and misses cache-only rows', () => {
+    const { db } = useDb()
+    db.upsertPaper(paper({ doi: '10.1000/cache-only', title: 'CRISPR cache only' }))
+    db.upsertLibraryPaper({
+      unique_id: '10.1000/library',
+      title: 'CRISPR library hit',
+      relevance: 'high',
+    } satisfies LibraryPaperInput)
+    expect(db.searchLibraryPapers({ query: 'crispr' }).map(row => row.unique_id)).toEqual(['10.1000/library'])
+    expect(db.searchPapers({ query: 'crispr' }).map(row => row.doi)).toEqual(['10.1000/cache-only'])
+  })
+
+  it('migrates v3 curated_papers JOIN papers into one global library row', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-literature-v3-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const path = join(dir, 'literature.db')
+    const raw = new DatabaseSync(path)
+    raw.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE papers (
+        doi TEXT PRIMARY KEY, title TEXT NOT NULL, authors TEXT NOT NULL DEFAULT '[]',
+        journal TEXT, issn TEXT, eissn TEXT, publication_date TEXT, year INTEGER,
+        abstract TEXT, url TEXT, source TEXT NOT NULL DEFAULT 'manual',
+        is_open_access INTEGER NOT NULL DEFAULT 0, citation_count INTEGER NOT NULL DEFAULT 0,
+        impact_factor REAL, cas_partition INTEGER, is_sci INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+      );
+      CREATE TABLE tracking_plans (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('topic', 'person')),
+        journal_whitelist TEXT, orcid TEXT,
+        time_window_days INTEGER NOT NULL DEFAULT 7,
+        search_interval_days INTEGER NOT NULL DEFAULT 7,
+        enabled INTEGER NOT NULL DEFAULT 1, notes TEXT,
+        created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+      );
+      CREATE TABLE curated_papers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id TEXT NOT NULL REFERENCES tracking_plans(id) ON DELETE CASCADE,
+        unique_id TEXT NOT NULL, relevance TEXT NOT NULL, note TEXT,
+        added_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+        UNIQUE(plan_id, unique_id)
+      );
+      INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+      INSERT INTO tracking_plans (id, name, kind) VALUES ('plan-a', 'Topic A', 'topic');
+      INSERT INTO tracking_plans (id, name, kind, orcid) VALUES ('plan-b', 'Person B', 'person', '0000-0002-0000-0001');
+      INSERT INTO papers (doi, title, journal) VALUES ('10.1000/shared', 'Shared paper', 'Nature');
+      INSERT INTO curated_papers (plan_id, unique_id, relevance, note)
+        VALUES ('plan-a', '10.1000/shared', 'very_high', 'topic match');
+      INSERT INTO curated_papers (plan_id, unique_id, relevance, note)
+        VALUES ('plan-b', '10.1000/shared', 'medium', 'not first author');
+    `)
+    raw.close()
+
+    const db = new LiteratureDatabase(path)
+    db.open()
+    expect(db.stats().schemaVersion).toBe(4)
+    expect(db.countLibraryPapers()).toBe(1)
+    const row = db.getLibraryPaper('10.1000/shared')
+    expect(row?.title).toBe('Shared paper')
+    expect(row?.relevance).toBe('very_high')
+    expect(row?.note).toContain('topic match')
+    expect(row?.note).toContain('not first author')
+    db.close()
   })
 })
 

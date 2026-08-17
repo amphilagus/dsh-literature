@@ -1,8 +1,8 @@
 /**
  * Literature-tracking tools: manage the tracking-plan table, run one
  * direction's dual-source (Crossref + arXiv) windowed search with first-pass
- * dedupe, curate matching papers into the direction library, and close the
- * search log (the completion endpoint of every scheduled run).
+ * dedupe against the global library, copy screened cache rows into that
+ * library, and close the search log (the completion endpoint of every run).
  * @module @amphilagus/dsh-literature/tools/tracking
  */
 
@@ -35,6 +35,19 @@ function asError(error: unknown): { ok: false; code: string; message: string } {
   return { ok: false, code: 'internal_error', message: messageOf(error) }
 }
 
+/** Lowercase and collapse whitespace for plan-name comparison. */
+export function normalizePlanName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+/** True when two names are equal after normalize, or one contains the other. */
+export function planNamesSimilar(left: string, right: string): boolean {
+  const a = normalizePlanName(left)
+  const b = normalizePlanName(right)
+  if (a.length === 0 || b.length === 0) return false
+  return a === b || a.includes(b) || b.includes(a)
+}
+
 // -------------------------------------------------------------- plan add
 
 const PLAN_SCHEMA = {
@@ -57,11 +70,13 @@ export function registerTrackingPlanAddTool(ctx: Context, service: LiteratureSer
   return ctx.tools.register(defineTool({
     name: TRACKING_PLAN_ADD_TOOL_NAME,
     description:
-      'Add or update one literature-tracking direction (文献跟踪方案表). A `topic` direction tracks a '
-      + 'research theme with an optional journal-whitelist (ISSN array) that filters Crossref results. A '
-      + '`person` direction tracks one researcher and REQUIRES their ORCID. `time_window_days` is the search '
-      + 'window (e.g. 3/7/30 days); `search_interval_days` is the scheduling period the agent uses to renew '
-      + 'the reminder. Use `notes` for English search keywords when the name is not English.',
+      'Add or update one literature-tracking direction (文献跟踪方案表). Similar names (or the same ORCID for '
+      + '`person`) return `possible_duplicate` plus the existing list of that kind and do not write; call again '
+      + 'with `confirm=true` after the user agrees. A `topic` direction tracks a research theme with an optional '
+      + 'journal-whitelist (ISSN array) that filters Crossref results. A `person` direction tracks one researcher '
+      + 'and REQUIRES their ORCID. `time_window_days` is the search window (e.g. 3/7/30 days); `search_interval_days` '
+      + 'is the scheduling period the agent uses to renew the reminder. Use `notes` for English search keywords when '
+      + 'the name is not English.',
     parameters: {
       name: {
         type: 'string',
@@ -99,8 +114,32 @@ export function registerTrackingPlanAddTool(ctx: Context, service: LiteratureSer
         type: 'string',
         description: 'Optional notes, e.g. English search keywords or screening criteria.',
       },
+      confirm: {
+        type: 'boolean',
+        description:
+          'Set true to create the direction even when a similar name (or the same ORCID) already exists. '
+          + 'Defaults to false: a possible duplicate returns the existing list of that kind without writing.',
+      },
     },
-    output: { schema: { oneOf: [PLAN_SCHEMA, ERROR_SCHEMA] } as const, render: renderJsonValue },
+    output: {
+      schema: {
+        oneOf: [
+          PLAN_SCHEMA,
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true, const: false },
+              code: { type: 'string', required: true, const: 'possible_duplicate' },
+              message: { type: 'string', required: true },
+              existing: { type: 'array', required: true, items: PLAN_SCHEMA },
+            },
+          },
+          ERROR_SCHEMA,
+        ],
+      } as const,
+      render: renderJsonValue,
+    },
     timeoutMs: 10_000,
     isConcurrencySafe: () => true,
     async execute(args, _exec) {
@@ -116,10 +155,42 @@ export function registerTrackingPlanAddTool(ctx: Context, service: LiteratureSer
         if (kind === 'topic' && whitelist !== undefined && !Array.isArray(whitelist)) {
           return { ok: false, code: 'invalid_whitelist', message: 'journal_whitelist must be an array of ISSN strings.' }
         }
-        const id = `plan-${args.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`
+        const name = args.name.trim()
+        const orcid = args.orcid !== undefined ? args.orcid.trim() : ''
+        const confirm = args.confirm === true
+        const id = `plan-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`
+        if (!confirm) {
+          const sameKind = service.db.listTrackingPlans().filter(plan => plan.kind === kind)
+          const duplicate = sameKind.some(plan => {
+            if (plan.id === id) return false
+            if (planNamesSimilar(plan.name, name)) return true
+            if (kind === 'person' && orcid.length > 0 && plan.orcid !== null && plan.orcid.toLowerCase() === orcid.toLowerCase()) {
+              return true
+            }
+            return false
+          })
+          if (duplicate) {
+            return {
+              ok: false as const,
+              code: 'possible_duplicate' as const,
+              message: `A similar ${kind} direction may already exist. Show the list, confirm with the user, then call again with confirm=true.`,
+              existing: sameKind.map(plan => ({
+                id: plan.id,
+                name: plan.name,
+                kind: plan.kind,
+                journal_whitelist: plan.journal_whitelist === null ? null : JSON.parse(plan.journal_whitelist),
+                orcid: plan.orcid,
+                time_window_days: plan.time_window_days,
+                search_interval_days: plan.search_interval_days,
+                enabled: plan.enabled,
+                notes: plan.notes,
+              })),
+            }
+          }
+        }
         service.db.upsertTrackingPlan({
           id,
-          name: args.name.trim(),
+          name,
           kind,
           ...whitelist !== undefined ? { journal_whitelist: JSON.stringify(whitelist) } : {},
           ...args.orcid !== undefined ? { orcid: args.orcid.trim() } : {},
@@ -204,7 +275,7 @@ export function registerTrackingPlanListTool(ctx: Context, service: LiteratureSe
 export function registerTrackingPlanRemoveTool(ctx: Context, service: LiteratureService): () => void {
   return ctx.tools.register(defineTool({
     name: TRACKING_PLAN_REMOVE_TOOL_NAME,
-    description: 'Delete one literature-tracking direction by id or name. Its curated library and search logs are removed with it.',
+    description: 'Delete one literature-tracking direction by id or name. Its search logs are removed with it; the global library is kept.',
     parameters: {
       plan: { type: 'string', required: true, description: 'Plan id or name.' },
     },
@@ -257,8 +328,8 @@ export function registerTrackingSearchTool(ctx: Context, service: LiteratureServ
     name: TRACKING_SEARCH_TOOL_NAME,
     description:
       'Run one literature-tracking direction\'s scheduled search: queries Crossref AND arXiv for the plan\'s '
-      + 'configured window, applies the topic journal whitelist, caches every hit into the legacy literature '
-      + 'database, and auto-filters hits this direction already curates (first-pass dedupe). Returns the candidates '
+      + 'configured window, applies the topic journal whitelist, stages every hit in the search cache, '
+      + 'and auto-filters hits already in the global library (first-pass dedupe). Returns the candidates '
       + 'for MANUAL screening plus the new search-log id — finish the run with tracking_curate + tracking_log_complete.',
     parameters: {
       plan: { type: 'string', required: true, description: 'Plan id or name.' },
@@ -333,15 +404,14 @@ const CURATED_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    id: { type: 'integer', required: true },
-    plan_id: { type: 'string', required: true },
     unique_id: { type: 'string', required: true },
-    relevance: { type: 'string', required: true, enum: [...RELEVANCE_VALUES] },
-    note: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
-    added_at: { type: 'string', required: true },
-    title: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+    title: { type: 'string', required: true },
     journal: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
     url: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+    relevance: { type: 'string', required: true, enum: [...RELEVANCE_VALUES] },
+    note: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+    source_plan_id: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+    added_at: { type: 'string', required: true },
   },
 } as const
 
@@ -349,13 +419,12 @@ export function registerTrackingCurateTool(ctx: Context, service: LiteratureServ
   return ctx.tools.register(defineTool({
     name: TRACKING_CURATE_TOOL_NAME,
     description:
-      'Curate one paper into a direction\'s new library (新库): the paper must already exist in the legacy '
-      + 'literature database (tracking_search caches every hit there), and it moves over by its unique id '
-      + '(DOI or arxiv:xxxx.xxxxx). Grade relevance from the screening judgment: very_high / high / medium / low. '
-      + 'One paper may exist under several directions but only once per direction — a repeat returns already_curated. '
-      + 'Use `note` to record why (e.g. first/corresponding author, exact topic match).',
+      'Copy one screened paper from the search cache into the global curated library. The paper must already '
+      + 'exist in the cache (tracking_search / literature_search remote hits write it there). Grade relevance: '
+      + 'very_high / high / medium / low. The same unique_id (DOI or arxiv:xxxx.xxxxx) exists only once in the '
+      + 'library — a repeat returns already_curated. Optional `plan` is stored as provenance only. Use `note` to '
+      + 'record why (e.g. first/corresponding author, exact topic match).',
     parameters: {
-      plan: { type: 'string', required: true, description: 'Plan id or name of the direction.' },
       unique_id: {
         type: 'string',
         required: true,
@@ -368,6 +437,7 @@ export function registerTrackingCurateTool(ctx: Context, service: LiteratureServ
         description: 'Screening grade: very_high (exact topic/method match), high (clearly relevant), medium (marginally relevant or the tracked person is NOT first/corresponding author), low (tangential).',
       },
       note: { type: 'string', description: 'Screening reason, e.g. author role or match justification.' },
+      plan: { type: 'string', description: 'Optional plan id or name recorded as the source of this curation.' },
     },
     output: {
       schema: {
@@ -391,28 +461,73 @@ export function registerTrackingCurateTool(ctx: Context, service: LiteratureServ
     isConcurrencySafe: () => true,
     async execute(args, _exec) {
       try {
-        const plan = service.db.getTrackingPlan(args.plan)
-        if (plan === null) return { ok: false, code: 'plan_not_found', message: `No tracking plan '${args.plan}'.` }
+        let sourcePlanId: string | null = null
+        if (args.plan !== undefined && String(args.plan).trim().length > 0) {
+          const plan = service.db.getTrackingPlan(args.plan)
+          if (plan === null) return { ok: false, code: 'plan_not_found', message: `No tracking plan '${args.plan}'.` }
+          sourcePlanId = plan.id
+        }
         const uniqueId = normalizeCandidateId(args.unique_id)
         if (uniqueId === null) return { ok: false, code: 'invalid_unique_id', message: `Unrecognized unique id '${args.unique_id}'.` }
+        const existing = service.db.getLibraryPaper(uniqueId)
+        if (existing !== null) {
+          return {
+            ok: true,
+            curated: false,
+            already_curated: true,
+            entry: {
+              unique_id: existing.unique_id,
+              title: existing.title,
+              journal: existing.journal,
+              url: existing.url,
+              relevance: existing.relevance,
+              note: existing.note,
+              source_plan_id: existing.source_plan_id,
+              added_at: existing.added_at,
+            },
+          }
+        }
         const paper = service.db.getPaper(uniqueId)
         if (paper === null) {
           return {
             ok: false,
             code: 'paper_not_in_legacy_db',
-            message: `Paper '${uniqueId}' is not in the legacy database yet; run tracking_search for this direction first so its hits are cached.`,
+            message: `Paper '${uniqueId}' is not in the search cache yet; run tracking_search or literature_search first so its hits are cached.`,
           }
         }
-        const created = service.db.curatePaper(plan.id, uniqueId, args.relevance as CurationRelevance, args.note ?? null)
+        const created = service.db.curateFromCache(uniqueId, args.relevance as CurationRelevance, args.note ?? null, sourcePlanId)
         if (created === null) {
-          const existing = service.db.getCuratedPaper(plan.id, uniqueId)
-          return { ok: true, curated: false, already_curated: true, entry: existing === null ? null : { ...existing, title: paper.title, journal: paper.journal, url: paper.url } }
+          const again = service.db.getLibraryPaper(uniqueId)
+          return {
+            ok: true,
+            curated: false,
+            already_curated: true,
+            entry: again === null ? null : {
+              unique_id: again.unique_id,
+              title: again.title,
+              journal: again.journal,
+              url: again.url,
+              relevance: again.relevance,
+              note: again.note,
+              source_plan_id: again.source_plan_id,
+              added_at: again.added_at,
+            },
+          }
         }
         return {
           ok: true,
           curated: true,
           already_curated: false,
-          entry: { ...created, title: paper.title, journal: paper.journal, url: paper.url },
+          entry: {
+            unique_id: created.unique_id,
+            title: created.title,
+            journal: created.journal,
+            url: created.url,
+            relevance: created.relevance,
+            note: created.note,
+            source_plan_id: created.source_plan_id,
+            added_at: created.added_at,
+          },
         }
       } catch (error) {
         return asError(error)
@@ -497,9 +612,9 @@ export function registerTrackingLogCompleteTool(ctx: Context, service: Literatur
 export function registerTrackingCuratedListTool(ctx: Context, service: LiteratureService): () => void {
   return ctx.tools.register(defineTool({
     name: TRACKING_CURATED_LIST_TOOL_NAME,
-    description: 'List one direction\'s curated library (新库) with relevance grades and screening notes, newest first.',
+    description: 'List the global curated library with relevance grades and screening notes, newest first. Optional query searches the library FTS.',
     parameters: {
-      plan: { type: 'string', required: true, description: 'Plan id or name.' },
+      query: { type: 'string', description: 'Optional full-text query over the global library.' },
       limit: { type: 'integer', description: 'Maximum entries, between 1 and 500. Defaults to 100.' },
     },
     output: {
@@ -510,7 +625,6 @@ export function registerTrackingCuratedListTool(ctx: Context, service: Literatur
             additionalProperties: false,
             properties: {
               ok: { type: 'boolean', required: true, const: true },
-              plan: { type: 'string', required: true },
               entries: { type: 'array', required: true, items: CURATED_SCHEMA },
             },
           },
@@ -523,10 +637,17 @@ export function registerTrackingCuratedListTool(ctx: Context, service: Literatur
     isConcurrencySafe: () => true,
     async execute(args, _exec) {
       try {
-        const plan = service.db.getTrackingPlan(args.plan)
-        if (plan === null) return { ok: false, code: 'plan_not_found', message: `No tracking plan '${args.plan}'.` }
-        const entries = service.db.listCuratedPapers(plan.id, args.limit ?? 100)
-        return { ok: true, plan: plan.name, entries }
+        const entries = service.db.listLibraryPapers(args.limit ?? 100, args.query).map(entry => ({
+          unique_id: entry.unique_id,
+          title: entry.title,
+          journal: entry.journal,
+          url: entry.url,
+          relevance: entry.relevance,
+          note: entry.note,
+          source_plan_id: entry.source_plan_id,
+          added_at: entry.added_at,
+        }))
+        return { ok: true, entries }
       } catch (error) {
         return asError(error)
       }

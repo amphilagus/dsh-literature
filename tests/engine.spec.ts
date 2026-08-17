@@ -42,11 +42,12 @@ describe('LiteratureSearchEngine', () => {
       work({ DOI: '10.1000/remote', title: 'Remote only' }),
     ])
     const engine = useEngine(remote)
-    engine.db.upsertPaper({
-      doi: '10.1000/shared',
+    engine.db.upsertLibraryPaper({
+      unique_id: '10.1000/shared',
       title: 'Shared from local cache',
       authors: JSON.stringify(['Local Author']),
       year: 2023,
+      relevance: 'high',
     })
 
     const result = await engine.search('shared')
@@ -108,7 +109,7 @@ describe('LiteratureSearchEngine', () => {
       },
     }
     const engine = useEngine(failing)
-    engine.db.upsertPaper({ doi: '10.1000/local', title: 'Only local' })
+    engine.db.upsertLibraryPaper({ unique_id: '10.1000/local', title: 'Only local', relevance: 'high' })
     const result = await engine.search('local', { sources: 'both' })
     if (!result.ok) throw new Error('expected success')
     expect(result.papers).toHaveLength(1)
@@ -128,8 +129,8 @@ describe('LiteratureSearchEngine', () => {
       work({ DOI: '10.1000/newer', title: 'Newer' }),
     ])
     const engine = useEngine(remote)
-    engine.db.upsertPaper({ doi: '10.1000/older', title: 'Older', year: 2019 })
-    engine.db.upsertPaper({ doi: '10.1000/newer', title: 'Newer', year: 2024 })
+    engine.db.upsertLibraryPaper({ unique_id: '10.1000/older', title: 'Older', year: 2019, relevance: 'high' })
+    engine.db.upsertLibraryPaper({ unique_id: '10.1000/newer', title: 'Newer', year: 2024, relevance: 'high' })
     const result = await engine.search('er', { sortBy: 'date', sources: 'local' })
     if (!result.ok) throw new Error('expected success')
     expect(result.papers.map(paper => paper.year)).toEqual([2024, 2019])
@@ -260,16 +261,20 @@ describe('LiteratureSearchEngine', () => {
     expect(result).toMatchObject({ ok: false, code: 'invalid_orcid' })
   })
 
-  it('looks up DOIs local-first, then Crossref with caching', async () => {
+  it('looks up DOIs from the library first; Crossref hits stay in the cache only', async () => {
     const remote = stubCrossref([work({ DOI: '10.1000/fresh', title: 'Fresh fetch' })])
     const engine = useEngine(remote)
     const first = await engine.get('10.1000/fresh', false)
     expect(first.ok).toBe(true)
     if (first.ok) expect(first.cached).toBe(false)
-    const again = await engine.get('10.1000/fresh', false)
-    if (!again.ok) throw new Error('expected success')
-    expect(again.cached).toBe(true)
-    expect(again.paper.title).toBe('Fresh fetch')
+    expect(engine.db.getPaper('10.1000/fresh')?.title).toBe('Fresh fetch')
+    expect(engine.db.getLibraryPaper('10.1000/fresh')).toBeNull()
+
+    engine.db.upsertLibraryPaper({ unique_id: '10.1000/owned', title: 'Library owned', relevance: 'high' })
+    const owned = await engine.get('10.1000/owned', false)
+    if (!owned.ok) throw new Error('expected success')
+    expect(owned.cached).toBe(true)
+    expect(owned.paper.title).toBe('Library owned')
   })
 
   it('normalizes DOIs, rejects invalid ones, and maps 404 to not_found', async () => {
@@ -304,5 +309,15 @@ describe('LiteratureSearchEngine', () => {
       year: 2022,
       source: 'local',
     })
+  })
+
+  it('sources=local hits curated library rows and misses the papers cache', async () => {
+    const engine = useEngine(stubCrossref([]))
+    engine.db.upsertPaper({ doi: '10.1000/cache', title: 'Cache only CRISPR' })
+    engine.db.upsertLibraryPaper({ unique_id: '10.1000/lib', title: 'Library CRISPR', relevance: 'high' })
+    const result = await engine.search('CRISPR', { sources: 'local' })
+    if (!result.ok) throw new Error('expected success')
+    expect(result.papers.map(paper => paper.doi)).toEqual(['10.1000/lib'])
+    expect(result.papers[0]?.source).toBe('local')
   })
 })

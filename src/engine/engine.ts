@@ -1,12 +1,12 @@
 /**
- * Literature search engine: merges local SQLite FTS results with Crossref
- * API results, deduplicates by DOI (local records win), optionally caches
- * remote hits into the database, and serves DOI lookups local-first.
+ * Literature search engine: merges curated-library FTS results with Crossref
+ * API results, deduplicates by DOI (library records win), caches remote hits
+ * into the papers staging table, and serves DOI lookups library-first.
  * @module @amphilagus/dsh-literature/engine
  */
 
 import { LiteratureDatabase } from '../db/database.ts'
-import type { PaperFilters, PaperRecord } from '../db/types.ts'
+import type { LibraryPaperRecord, PaperFilters, PaperRecord } from '../db/types.ts'
 import { normalizeDoi, toPaperInput, type CrossrefSearchApi, type CrossrefWork } from './crossref.ts'
 import { isInDateWindow, recentWindow } from './dates.ts'
 import { normalizeOrcid } from './orcid.ts'
@@ -48,6 +48,35 @@ export function toHit(record: PaperRecord, source: PaperSource): PaperHit {
     openAccess: record.is_open_access === 1,
     citations: record.citation_count,
     source,
+  }
+}
+
+/** Project a library row into a model-facing hit (`unique_id` becomes `doi`). */
+export function toHitFromLibrary(record: LibraryPaperRecord, source: PaperSource = 'local'): PaperHit {
+  return toHit(libraryToPaperRecord(record), source)
+}
+
+/** View a library row as a paper record so shared projections keep working. */
+export function libraryToPaperRecord(record: LibraryPaperRecord): PaperRecord {
+  return {
+    doi: record.unique_id,
+    title: record.title,
+    authors: record.authors,
+    journal: record.journal,
+    issn: record.issn,
+    eissn: record.eissn,
+    publication_date: record.publication_date,
+    year: record.year,
+    abstract: record.abstract,
+    url: record.url,
+    source: record.source,
+    is_open_access: record.is_open_access,
+    citation_count: record.citation_count,
+    impact_factor: record.impact_factor,
+    cas_partition: record.cas_partition,
+    is_sci: record.is_sci,
+    created_at: record.added_at,
+    updated_at: record.updated_at,
   }
 }
 
@@ -126,8 +155,8 @@ export class LiteratureSearchEngine {
     if (sources === 'local' || sources === 'both') {
       usedSources.push('local')
       try {
-        for (const record of this.db.searchPapers(localFilters)) {
-          if (!merged.has(record.doi)) merged.set(record.doi, toHit(record, 'local'))
+        for (const record of this.db.searchLibraryPapers(localFilters)) {
+          if (!merged.has(record.unique_id)) merged.set(record.unique_id, toHitFromLibrary(record, 'local'))
         }
       } catch (error) {
         warnings.push(`local search failed: ${messageOf(error)}`)
@@ -207,7 +236,7 @@ export class LiteratureSearchEngine {
     }
   }
 
-  /** DOI lookup: local cache first, then Crossref (and cache the fetch). */
+  /** DOI lookup: curated library first, then Crossref (the fetch is stored in the search cache only). */
   async get(doi: string, forceRemote = false, signal?: AbortSignal): Promise<GetResult> {
     const normalized = normalizeDoi(doi)
     if (normalized === null) {
@@ -215,10 +244,10 @@ export class LiteratureSearchEngine {
     }
     if (!forceRemote) {
       try {
-        const cached = this.db.getPaper(normalized)
-        if (cached !== null) return { ok: true, cached: true, paper: toHit(cached, 'local') }
+        const owned = this.db.getLibraryPaper(normalized)
+        if (owned !== null) return { ok: true, cached: true, paper: toHitFromLibrary(owned, 'local') }
       } catch (error) {
-        // a broken cache must not block the remote lookup
+        // a broken library must not block the remote lookup
         void error
       }
     }

@@ -1,6 +1,6 @@
 /**
- * The `literature_db` tool: manage the local literature database — stats,
- * local search, single-record lookup, import, delete, backup, export, vacuum.
+ * The `literature_db` tool: manage the curated literature library — stats,
+ * library search, single-record lookup, import, delete, backup, export, vacuum.
  * All backup/export targets are confined to the literature data directory.
  * @module @amphilagus/dsh-literature/tools/db
  */
@@ -9,7 +9,7 @@ import { statSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { toHit } from '../engine/engine.ts'
+import { toHitFromLibrary } from '../engine/engine.ts'
 import type { PaperHit } from '../engine/types.ts'
 import type { PaperInput } from '../db/types.ts'
 import type { SciJournalHit } from '../db/catalog.ts'
@@ -20,10 +20,10 @@ import { PAPER_SCHEMA } from './schemas.ts'
 export const LITERATURE_DB_TOOL_NAME = 'literature_db'
 
 const DB_DESCRIPTION =
-  'Manage the local literature database and the bundled SCI journal catalog. Actions: stats, '
-  + 'search (local papers), journals (SCI catalog by title / ISSN / eISSN / CAS discipline), get, '
-  + 'import, delete, backup, export, vacuum. Use journals to pick ISSN values for a tracking-plan '
-  + 'whitelist. Backup/export targets stay inside the literature data directory.'
+  'Manage the curated literature library and the bundled SCI journal catalog. Actions: stats, '
+  + 'search (curated library), journals (SCI catalog by title / ISSN / eISSN / CAS discipline), get, '
+  + 'import (directly into the library), delete (library rows), backup, export, vacuum. Use journals to '
+  + 'pick ISSN values for a tracking-plan whitelist. Backup/export targets stay inside the literature data directory.'
 
 const IMPORT_ITEM_SCHEMA = {
   type: 'object',
@@ -98,6 +98,8 @@ const DB_STATS_SCHEMA = {
     sizeBytes: { type: 'integer', required: true },
     schemaVersion: { type: 'integer', required: true },
     paperCount: { type: 'integer', required: true },
+    cacheCount: { type: 'integer', required: true },
+    libraryCount: { type: 'integer', required: true },
     journalCount: { type: 'integer', required: true },
     earliestYear: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
     latestYear: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
@@ -241,7 +243,7 @@ type DbAction = 'stats' | 'search' | 'journals' | 'get' | 'import' | 'delete' | 
 
 /** The exact canonical outcome union, mirroring {@link DB_OUTPUT_SCHEMA}. */
 type DbOutcome =
-  | { ok: true; action: 'stats'; dbPath: string; sizeBytes: number; schemaVersion: number; paperCount: number; journalCount: number; earliestYear: number | null; latestYear: number | null }
+  | { ok: true; action: 'stats'; dbPath: string; sizeBytes: number; schemaVersion: number; paperCount: number; cacheCount: number; libraryCount: number; journalCount: number; earliestYear: number | null; latestYear: number | null }
   | { ok: true; action: 'search'; query: string; total: number; papers: PaperHit[] }
   | { ok: true; action: 'journals'; query: string; total: number; journals: SciJournalHit[] }
   | { ok: true; action: 'get'; doi: string; paper: PaperHit | null }
@@ -305,12 +307,12 @@ export function registerLiteratureDbTool(ctx: Context, service: LiteratureServic
       },
       query: {
         type: 'string',
-        description: 'Search keywords. For action "search": local papers. For action "journals": journal title, print ISSN, eISSN, or CAS discipline.',
+        description: 'Search keywords. For action "search": curated library. For action "journals": journal title, print ISSN, eISSN, or CAS discipline.',
       },
-      doi: { type: 'string', description: 'Paper DOI; used by actions "get" and "delete".' },
+      doi: { type: 'string', description: 'Library unique id (DOI); used by actions "get" and "delete".' },
       items: {
         type: 'array',
-        description: 'Paper records to store; used by action "import".',
+        description: 'Paper records to import directly into the curated library; used by action "import".',
         items: IMPORT_ITEM_SCHEMA,
       },
       limit: { type: 'integer', description: 'Maximum results for actions "search" and "journals", between 1 and 50. Defaults to 20.' },
@@ -335,13 +337,13 @@ export function registerLiteratureDbTool(ctx: Context, service: LiteratureServic
               return { ok: false, action, code: 'invalid_limit', message: limit }
             }
             const query = args.query?.trim() ?? ''
-            const records = service.db.searchPapers({ query, limit })
+            const records = service.db.searchLibraryPapers({ query, limit })
             return {
               ok: true,
               action: 'search',
               query,
               total: records.length,
-              papers: records.map(record => toHit(record, 'local')),
+              papers: records.map(record => toHitFromLibrary(record, 'local')),
             }
           }
           case 'journals': {
@@ -356,8 +358,8 @@ export function registerLiteratureDbTool(ctx: Context, service: LiteratureServic
           case 'get': {
             const doi = requireDoi(args.doi)
             if (typeof doi !== 'string') return { ok: false, action, code: doi.code, message: doi.message }
-            const record = service.db.getPaper(doi)
-            return { ok: true, action: 'get', doi, paper: record === null ? null : toHit(record, 'local') }
+            const record = service.db.getLibraryPaper(doi)
+            return { ok: true, action: 'get', doi, paper: record === null ? null : toHitFromLibrary(record, 'local') }
           }
           case 'import': {
             const items = (args.items ?? []) as unknown as ImportItem[]
@@ -370,7 +372,7 @@ export function registerLiteratureDbTool(ctx: Context, service: LiteratureServic
           case 'delete': {
             const doi = requireDoi(args.doi)
             if (typeof doi !== 'string') return { ok: false, action, code: doi.code, message: doi.message }
-            const deleted = service.db.deletePaper(doi)
+            const deleted = service.db.deleteLibraryPaper(doi)
             return { ok: true, action: 'delete', doi, deleted }
           }
           case 'backup': {

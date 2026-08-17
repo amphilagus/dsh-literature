@@ -40,6 +40,7 @@ export const SKILL_TRACKING_SETUP_CONTENT = `# 文献跟踪方向配置 (literat
 tracking_plan_add。person 方向：若档案已在，工具会回写 plan_id；若还没有档案，先 upsert 再 add。
 - time_window_days：近 3 天=3 / 近一周=7 / 近一月=30（默认 7）
 - search_interval_days：排班周期天数（默认 7）
+- 若返回 possible_duplicate：把 existing 名单展示给用户确认。确认后**原样再调一次并带 confirm=true**；这一遍不拦。同一名称（同一 id）再调是更新已有方向，不走查重。
 
 ### 5. 排班
 每个方向一条 schedule_create。
@@ -50,8 +51,8 @@ tracking_plan_add。person 方向：若档案已在，工具会回写 plan_id；
 
 ### 6. 维护
 - 暂停：tracking_plan_add 原字段 + enabled=0，并 schedule_delete；恢复 enabled=1 并重建 every。
-- 删除：先与用户确认，再 tracking_plan_remove（新库与搜索记录一并删；档案保留）。
-- 查看：tracking_plan_list / tracking_curated_list / tracking_log_list / researcher_profile_query。
+- 删除：先与用户确认，再 tracking_plan_remove（只删方案与搜索记录；**全局新库保留**；档案保留）。
+- 查看：tracking_plan_list / tracking_curated_list（全局新库）/ tracking_log_list / researcher_profile_query。
 
 ## 完成标志
 tracking_plan_add 返回该方向配置；周期方向还有 schedule id。
@@ -77,10 +78,10 @@ tracking_search(plan=方向名)。记住返回的 log_id。excluded_already_cura
 - **low**：仅沾边。默认不入库，除非用户要求记录。
 
 一作=作者列表第一位。通讯=列表末位，或条目上的 corresponding 标记；不确定则保守判 medium。
-一篇文章可入多个方向的新库；本次只判当前方向，不要替别的方向做判断。
+主题与人筛完都进**同一张全局新库**；同一 unique_id 全库只有一行。本次只判当前方向的候选。
 
 ### 3. 入库
-要对入库的候选调用 tracking_curate(plan, unique_id, relevance, note)。note 写筛选理由。unique_id 用候选原值。already_curated=true 则跳过。
+要对入库的候选调用 tracking_curate(unique_id, relevance, note, plan?)。note 写筛选理由。unique_id 用候选原值。plan 可选（来源备注）。already_curated=true 则跳过。
 
 ### 4. 完成记录（必须）
 tracking_log_complete(log_id, findings, summary)。0 命中也要调用：findings=[]，summary 说明无新文或失败原因。
@@ -107,13 +108,15 @@ export const SKILL_SURVEY_CONTENT = `# 文献调研 (literature-survey)
 用户要「看看某课题 / 某人最近发了什么 / 帮我调研一下」，且没有要求写入跟踪方案或定期提醒。
 
 ## 流程
-1. literature_search：query 必填；最近 N 天加 recentDays；已有 ORCID 就带 orcid。不要用 fromYear/toYear 表示最近几天。需要预印本时说明 arXiv 走跟踪搜索，本技能不建 plan。
-2. 需要全文细节时 literature_get（DOI）。
-3. 按工具返回的条目综述：重点几篇各一句，其余可列题名；不确定的标出来，不要假装读过全文。
+1. literature_search：query 必填；最近 N 天加 recentDays；已有 ORCID 就带 orcid。不要用 fromYear/toYear 表示最近几天。sources=local 搜的是全局新库，不是远程缓存。需要预印本时说明 arXiv 走跟踪搜索，本技能不建 plan。
+2. 需要全文细节时 literature_get（DOI；先查新库，没有再走 Crossref，结果只进缓存）。
+3. 筛完要对入库的条目调用 tracking_curate(unique_id, relevance, note) 写入**全局新库**。缓存没有该条则先 search。
+4. 按工具返回的条目综述：重点几篇各一句，其余可列题名；不确定的标出来，不要假装读过全文。
 
 ## 不要做
-- 不要 tracking_plan_add / tracking_search / tracking_curate / tracking_log_complete。
+- 不要 tracking_plan_add / tracking_search / tracking_log_complete。
 - 不要为此建立 schedule。
+- 不要把远程搜索缓存当成馆藏。
 
 用户接着要「以后定期跟」时，再 load literature-tracking-setup（person 方向走档案工具）。
 `

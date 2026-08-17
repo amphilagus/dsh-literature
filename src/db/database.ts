@@ -11,12 +11,13 @@ import { DatabaseSync } from 'node:sqlite'
 import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
 import { SCHEMA_DDL, SCHEMA_VERSION } from './schema.ts'
 import type {
-  CuratedPaperRecord,
   CuratedPaperView,
   DatabaseStats,
   ImportResult,
   JournalInput,
   JournalRecord,
+  LibraryPaperInput,
+  LibraryPaperRecord,
   PaperFilters,
   PaperInput,
   PaperRecord,
@@ -31,6 +32,16 @@ import type {
 } from './types.ts'
 
 const DEFAULT_SOURCE = 'manual'
+
+/** Maximum rows kept in the `papers` search cache. Oldest `updated_at` dropped first. */
+export const PAPER_CACHE_LIMIT = 2000
+
+const RELEVANCE_RANK: Record<CurationRelevance, number> = {
+  very_high: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+}
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -96,6 +107,8 @@ export class LiteratureDatabase {
       db.exec('PRAGMA synchronous = NORMAL')
       db.exec('PRAGMA foreign_keys = ON')
       for (const statement of SCHEMA_DDL) db.exec(statement)
+      const stored = readSchemaVersion(db)
+      if (stored < 4) migrateV3CuratedToLibrary(db)
       db.prepare(
         `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -193,7 +206,19 @@ export class LiteratureDatabase {
       record.created_at,
       record.updated_at,
     )
+    this.prunePaperCache()
     return true
+  }
+
+  /** Drop oldest cache rows so `papers` never exceeds {@link PAPER_CACHE_LIMIT}. */
+  prunePaperCache(): void {
+    const extra = this.countPapers() - PAPER_CACHE_LIMIT
+    if (extra <= 0) return
+    this.requireDb().prepare(
+      `DELETE FROM papers WHERE rowid IN (
+         SELECT rowid FROM papers ORDER BY updated_at ASC, rowid ASC LIMIT ?
+       )`,
+    ).run(extra)
   }
 
   getPaper(doi: string): PaperRecord | null {
@@ -574,60 +599,208 @@ export class LiteratureDatabase {
   }
 
   /**
-   * Curate one paper into a direction (新库). `(plan_id, unique_id)` is unique:
-   * the same paper may exist under several directions but only once per
-   * direction. Returns the created record, or null when it is already curated
-   * for this plan.
+   * Copy one cache row into the global library and drop it from the cache.
+   * Returns the library row, or null when it is already curated. Throws when
+   * the unique id is not in the papers cache.
    */
-  curatePaper(planId: string, uniqueId: string, relevance: CurationRelevance, note: string | null): CuratedPaperRecord | null {
-    const db = this.requireDb()
-    const existing = this.getCuratedPaper(planId, uniqueId)
+  curateFromCache(
+    uniqueId: string,
+    relevance: CurationRelevance,
+    note: string | null,
+    sourcePlanId: string | null = null,
+  ): LibraryPaperRecord | null {
+    const existing = this.getLibraryPaper(uniqueId)
     if (existing !== null) return null
-    const result = db.prepare(
-      `INSERT INTO curated_papers (plan_id, unique_id, relevance, note)
-       VALUES (?, ?, ?, ?)`,
-    ).run(planId, uniqueId, relevance, note)
-    return {
-      id: Number(result.lastInsertRowid),
-      plan_id: planId,
+    const cached = this.getPaper(uniqueId)
+    if (cached === null) {
+      throw new Error(`paper_not_in_legacy_db:${uniqueId}`)
+    }
+    this.upsertLibraryPaper({
       unique_id: uniqueId,
+      title: cached.title,
+      authors: cached.authors,
+      journal: cached.journal,
+      issn: cached.issn,
+      eissn: cached.eissn,
+      publication_date: cached.publication_date,
+      year: cached.year,
+      abstract: cached.abstract,
+      url: cached.url,
+      source: cached.source,
+      is_open_access: cached.is_open_access,
+      citation_count: cached.citation_count,
+      impact_factor: cached.impact_factor,
+      cas_partition: cached.cas_partition,
+      is_sci: cached.is_sci,
       relevance,
       note,
+      source_plan_id: sourcePlanId,
+    })
+    this.deletePaper(uniqueId)
+    const created = this.getLibraryPaper(uniqueId)
+    if (created === null) throw new Error(`library upsert vanished for ${uniqueId}`)
+    return created
+  }
+
+  upsertLibraryPaper(input: LibraryPaperInput): boolean {
+    const db = this.requireDb()
+    const existing = this.getLibraryPaper(input.unique_id)
+    const base: LibraryPaperRecord = existing ?? {
+      unique_id: input.unique_id,
+      title: input.title,
+      authors: '[]',
+      journal: null,
+      issn: null,
+      eissn: null,
+      publication_date: null,
+      year: null,
+      abstract: null,
+      url: null,
+      source: DEFAULT_SOURCE,
+      is_open_access: 0,
+      citation_count: 0,
+      impact_factor: null,
+      cas_partition: null,
+      is_sci: 0,
+      relevance: input.relevance,
+      note: null,
+      source_plan_id: null,
       added_at: nowIso(),
+      updated_at: nowIso(),
     }
+    const record: LibraryPaperRecord = {
+      ...base,
+      ...definedEntries(input),
+      unique_id: input.unique_id,
+      title: input.title,
+      relevance: input.relevance,
+      updated_at: nowIso(),
+    }
+    db.prepare(
+      `INSERT INTO library_papers (
+         unique_id, title, authors, journal, issn, eissn, publication_date, year,
+         abstract, url, source, is_open_access, citation_count, impact_factor,
+         cas_partition, is_sci, relevance, note, source_plan_id, added_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(unique_id) DO UPDATE SET
+         title = excluded.title,
+         authors = excluded.authors,
+         journal = excluded.journal,
+         issn = excluded.issn,
+         eissn = excluded.eissn,
+         publication_date = excluded.publication_date,
+         year = excluded.year,
+         abstract = excluded.abstract,
+         url = excluded.url,
+         source = excluded.source,
+         is_open_access = excluded.is_open_access,
+         citation_count = excluded.citation_count,
+         impact_factor = excluded.impact_factor,
+         cas_partition = excluded.cas_partition,
+         is_sci = excluded.is_sci,
+         relevance = excluded.relevance,
+         note = excluded.note,
+         source_plan_id = excluded.source_plan_id,
+         updated_at = excluded.updated_at`,
+    ).run(
+      record.unique_id,
+      record.title,
+      record.authors,
+      record.journal,
+      record.issn,
+      record.eissn,
+      record.publication_date,
+      record.year,
+      record.abstract,
+      record.url,
+      record.source,
+      record.is_open_access,
+      record.citation_count,
+      record.impact_factor,
+      record.cas_partition,
+      record.is_sci,
+      record.relevance,
+      record.note,
+      record.source_plan_id,
+      record.added_at,
+      record.updated_at,
+    )
+    return true
   }
 
-  getCuratedPaper(planId: string, uniqueId: string): CuratedPaperRecord | null {
-    const row = this.requireDb().prepare(
-      'SELECT * FROM curated_papers WHERE plan_id = ? AND unique_id = ?',
-    ).get(planId, uniqueId)
-    return asRecord<CuratedPaperRecord>(row)
+  getLibraryPaper(uniqueId: string): LibraryPaperRecord | null {
+    const row = this.requireDb().prepare('SELECT * FROM library_papers WHERE unique_id = ?').get(uniqueId)
+    return asRecord<LibraryPaperRecord>(row)
   }
 
-  /** Curated entries of one direction joined with their source papers. */
-  listCuratedPapers(planId: string, limit = 100): CuratedPaperView[] {
-    const rows = this.requireDb().prepare(
-      `SELECT c.*, p.title, p.journal, p.url, p.publication_date
-       FROM curated_papers c
-       LEFT JOIN papers p ON p.doi = c.unique_id
-       WHERE c.plan_id = ?
-       ORDER BY c.added_at DESC, c.id DESC
-       LIMIT ?`,
-    ).all(planId, clampInteger(limit, 1, 500))
-    return rows as unknown as CuratedPaperView[]
+  deleteLibraryPaper(uniqueId: string): boolean {
+    const result = this.requireDb().prepare('DELETE FROM library_papers WHERE unique_id = ?').run(uniqueId)
+    return result.changes > 0
   }
 
-  /** All unique ids already curated under one direction (first-pass dedupe). */
-  curatedUniqueIds(planId: string): Set<string> {
-    const rows = this.requireDb().prepare(
-      'SELECT unique_id FROM curated_papers WHERE plan_id = ?',
-    ).all(planId)
+  countLibraryPapers(): number {
+    const row = this.requireDb().prepare('SELECT COUNT(*) AS count FROM library_papers').get()
+    return Number((row as { count: SQLOutputValue } | undefined)?.count ?? 0)
+  }
+
+  /** All unique ids already in the global library (first-pass tracking dedupe). */
+  libraryUniqueIds(): Set<string> {
+    const rows = this.requireDb().prepare('SELECT unique_id FROM library_papers').all()
     return new Set((rows as unknown as { unique_id: string }[]).map(row => row.unique_id))
   }
 
-  countCuratedPapers(): number {
-    const row = this.requireDb().prepare('SELECT COUNT(*) AS count FROM curated_papers').get()
-    return Number((row as { count: SQLOutputValue } | undefined)?.count ?? 0)
+  /** Global library entries, newest first. Optional `query` uses library FTS. */
+  listLibraryPapers(limit = 100, query?: string): CuratedPaperView[] {
+    if (query !== undefined && query.trim().length > 0) {
+      return this.searchLibraryPapers({ query, limit: clampInteger(limit, 1, 500) })
+    }
+    const rows = this.requireDb().prepare(
+      `SELECT * FROM library_papers ORDER BY added_at DESC, unique_id DESC LIMIT ?`,
+    ).all(clampInteger(limit, 1, 500))
+    return rows as unknown as CuratedPaperView[]
+  }
+
+  /**
+   * Filtered library search. A non-empty `query` runs an FTS5 match ordered by
+   * relevance; when FTS5 returns nothing or the query is CJK, it falls back to
+   * a substring scan over title/abstract/journal/authors.
+   */
+  searchLibraryPapers(filters: PaperFilters = {}): LibraryPaperRecord[] {
+    const db = this.requireDb()
+    const limit = clampInteger(filters.limit ?? 20, 1, 100)
+    const offset = clampInteger(filters.offset ?? 0, 0, 1_000_000)
+    const query = filters.query?.trim() ?? ''
+    const { where, params } = buildFilterClause(filters)
+    const useFts = query.length > 0 && !CJK.test(query)
+
+    if (useFts) {
+      const conditions = ['library_fts MATCH ?', ...where]
+      const matchParams: SQLInputValue[] = [toFtsQuery(query), ...params]
+      const rows = db.prepare(
+        `SELECT p.* FROM library_papers p
+         JOIN library_fts ON library_fts.rowid = p.rowid
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY bm25(library_fts)
+         LIMIT ? OFFSET ?`,
+      ).all(...matchParams, limit, offset)
+      const papers = rows as unknown as LibraryPaperRecord[]
+      if (papers.length > 0) return papers
+    }
+    return this.substringSearchLibrary(query, filters, limit, offset)
+  }
+
+  private substringSearchLibrary(query: string, filters: PaperFilters, limit: number, offset: number): LibraryPaperRecord[] {
+    const db = this.requireDb()
+    const { where, params } = buildFilterClause(filters)
+    const whereSql = [...where].join(' AND ')
+    const like = `%${escapeLike(query)}%`
+    const sql = `SELECT * FROM library_papers p
+      WHERE (p.title LIKE ? ESCAPE '\\' OR p.abstract LIKE ? ESCAPE '\\' OR p.journal LIKE ? ESCAPE '\\' OR p.authors LIKE ? ESCAPE '\\')
+      ${whereSql.length > 0 ? `AND ${whereSql}` : ''}
+      ORDER BY p.year DESC, p.added_at DESC
+      LIMIT ? OFFSET ?`
+    const rows = db.prepare(sql).all(like, like, like, like, ...params, limit, offset)
+    return rows as unknown as LibraryPaperRecord[]
   }
 
   /** Start one search log; returns its id. */
@@ -670,8 +843,9 @@ export class LiteratureDatabase {
   // -------------------------------------------------------- batch and admin
 
   /**
-   * Import a batch of papers in one transaction. Invalid records (missing
-   * or empty doi/title) are counted as failed without aborting the batch.
+   * Import a batch of papers into the global library in one transaction.
+   * Invalid records (missing or empty unique id/title) are counted as failed
+   * without aborting the batch.
    */
   importPapers(records: PaperInput[]): ImportResult {
     const db = this.requireDb()
@@ -681,15 +855,22 @@ export class LiteratureDatabase {
       let index = 0
       for (const record of records) {
         index += 1
-        const doi = record.doi?.trim() ?? ''
+        const uniqueId = record.doi?.trim() ?? ''
         const title = record.title?.trim() ?? ''
-        if (doi.length === 0 || title.length === 0) {
+        if (uniqueId.length === 0 || title.length === 0) {
           result.failed += 1
           result.errors.push(`record ${index}: doi and title are required`)
           continue
         }
-        const existed = this.getPaper(doi) !== null
-        this.upsertPaper(record)
+        const existed = this.getLibraryPaper(uniqueId) !== null
+        const { doi: _doi, ...paperFields } = record
+        void _doi
+        this.upsertLibraryPaper({
+          ...definedEntries(paperFields),
+          unique_id: uniqueId,
+          title,
+          relevance: 'medium',
+        })
         if (existed) result.skipped += 1
         else result.imported += 1
       }
@@ -710,21 +891,24 @@ export class LiteratureDatabase {
     return target
   }
 
-  /** Write all papers and journals to `destination` as one JSON document. */
+  /** Write the library, cache, and journals to `destination` as one JSON document. */
   exportToJson(destination: string): { path: string; count: number } {
     const db = this.requireDb()
     const target = resolve(destination)
     mkdirSync(dirname(target), { recursive: true })
-    const papers = db.prepare('SELECT * FROM papers ORDER BY year DESC, created_at DESC').all()
+    const library = db.prepare('SELECT * FROM library_papers ORDER BY year DESC, added_at DESC').all()
+    const cache = db.prepare('SELECT * FROM papers ORDER BY year DESC, created_at DESC').all()
     const journals = db.prepare('SELECT * FROM journals ORDER BY journal_title ASC').all()
     const document = {
       schemaVersion: SCHEMA_VERSION,
       exportedAt: nowIso(),
-      papers,
+      library,
+      cache,
+      papers: library,
       journals,
     }
     writeFileSync(target, JSON.stringify(document, null, 2), 'utf8')
-    return { path: target, count: (papers as unknown[]).length }
+    return { path: target, count: (library as unknown[]).length }
   }
 
   vacuum(): void {
@@ -740,23 +924,33 @@ export class LiteratureDatabase {
     const db = this.requireDb()
     const row = db.prepare(
       `SELECT
-         (SELECT COUNT(*) FROM papers) AS papers,
+         (SELECT COUNT(*) FROM papers) AS cache,
+         (SELECT COUNT(*) FROM library_papers) AS library,
          (SELECT COUNT(*) FROM journals) AS journals,
-         (SELECT MIN(year) FROM papers) AS min_year,
-         (SELECT MAX(year) FROM papers) AS max_year`,
+         (SELECT MIN(year) FROM library_papers) AS min_year,
+         (SELECT MAX(year) FROM library_papers) AS max_year`,
     ).get()
-    const values = (row ?? {}) as { papers?: SQLOutputValue; journals?: SQLOutputValue; min_year?: SQLOutputValue; max_year?: SQLOutputValue }
+    const values = (row ?? {}) as {
+      cache?: SQLOutputValue
+      library?: SQLOutputValue
+      journals?: SQLOutputValue
+      min_year?: SQLOutputValue
+      max_year?: SQLOutputValue
+    }
     let sizeBytes = 0
     try {
       sizeBytes = statSync(this.path).size
     } catch {
       sizeBytes = 0
     }
+    const cacheCount = Number(values.cache ?? 0)
     return {
       dbPath: this.path,
       sizeBytes,
       schemaVersion: SCHEMA_VERSION,
-      paperCount: Number(values.papers ?? 0),
+      paperCount: cacheCount,
+      cacheCount,
+      libraryCount: Number(values.library ?? 0),
       journalCount: Number(values.journals ?? 0),
       earliestYear: values.min_year === null || values.min_year === undefined ? null : Number(values.min_year),
       latestYear: values.max_year === null || values.max_year === undefined ? null : Number(values.max_year),
@@ -765,6 +959,134 @@ export class LiteratureDatabase {
 }
 
 // --------------------------------------------------------------- helpers
+
+function readSchemaVersion(db: DatabaseSync): number {
+  try {
+    const row = db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value?: SQLOutputValue } | undefined
+    const parsed = Number(row?.value ?? 0)
+    return Number.isFinite(parsed) ? parsed : 0
+  } catch {
+    return 0
+  }
+}
+
+interface V3CuratedJoinRow {
+  unique_id: string
+  relevance: CurationRelevance
+  note: string | null
+  plan_id: string
+  added_at: string
+  title: string | null
+  authors: string | null
+  journal: string | null
+  issn: string | null
+  eissn: string | null
+  publication_date: string | null
+  year: number | null
+  abstract: string | null
+  url: string | null
+  source: string | null
+  is_open_access: number | null
+  citation_count: number | null
+  impact_factor: number | null
+  cas_partition: number | null
+  is_sci: number | null
+}
+
+/**
+ * Copy v3 `curated_papers JOIN papers` into the global library. The same
+ * unique_id across directions becomes one row: higher relevance wins, notes
+ * are concatenated.
+ */
+function migrateV3CuratedToLibrary(db: DatabaseSync): void {
+  let rows: V3CuratedJoinRow[] = []
+  try {
+    rows = db.prepare(
+      `SELECT
+         c.unique_id, c.relevance, c.note, c.plan_id, c.added_at,
+         p.title, p.authors, p.journal, p.issn, p.eissn, p.publication_date,
+         p.year, p.abstract, p.url, p.source, p.is_open_access, p.citation_count,
+         p.impact_factor, p.cas_partition, p.is_sci
+       FROM curated_papers c
+       LEFT JOIN papers p ON p.doi = c.unique_id`,
+    ).all() as unknown as V3CuratedJoinRow[]
+  } catch {
+    return
+  }
+  if (rows.length === 0) return
+
+  const merged = new Map<string, V3CuratedJoinRow & { notes: string[] }>()
+  for (const row of rows) {
+    const current = merged.get(row.unique_id)
+    const note = row.note?.trim() ?? ''
+    if (current === undefined) {
+      merged.set(row.unique_id, { ...row, notes: note.length > 0 ? [note] : [] })
+      continue
+    }
+    if (note.length > 0) current.notes.push(note)
+    const currentRank = RELEVANCE_RANK[current.relevance] ?? 0
+    const nextRank = RELEVANCE_RANK[row.relevance] ?? 0
+    if (nextRank > currentRank) {
+      current.relevance = row.relevance
+      current.plan_id = row.plan_id
+    }
+    if (current.title === null && row.title !== null) {
+      Object.assign(current, {
+        title: row.title,
+        authors: row.authors,
+        journal: row.journal,
+        issn: row.issn,
+        eissn: row.eissn,
+        publication_date: row.publication_date,
+        year: row.year,
+        abstract: row.abstract,
+        url: row.url,
+        source: row.source,
+        is_open_access: row.is_open_access,
+        citation_count: row.citation_count,
+        impact_factor: row.impact_factor,
+        cas_partition: row.cas_partition,
+        is_sci: row.is_sci,
+      })
+    }
+    if (row.added_at < current.added_at) current.added_at = row.added_at
+  }
+
+  const insert = db.prepare(
+    `INSERT INTO library_papers (
+       unique_id, title, authors, journal, issn, eissn, publication_date, year,
+       abstract, url, source, is_open_access, citation_count, impact_factor,
+       cas_partition, is_sci, relevance, note, source_plan_id, added_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(unique_id) DO NOTHING`,
+  )
+  const now = nowIso()
+  for (const row of merged.values()) {
+    insert.run(
+      row.unique_id,
+      row.title ?? row.unique_id,
+      row.authors ?? '[]',
+      row.journal,
+      row.issn,
+      row.eissn,
+      row.publication_date,
+      row.year,
+      row.abstract,
+      row.url,
+      row.source ?? DEFAULT_SOURCE,
+      row.is_open_access ?? 0,
+      row.citation_count ?? 0,
+      row.impact_factor,
+      row.cas_partition,
+      row.is_sci ?? 0,
+      row.relevance,
+      row.notes.length > 0 ? row.notes.join(' | ') : null,
+      row.plan_id,
+      row.added_at,
+      now,
+    )
+  }
+}
 
 function quoteSqlString(raw: string): string {
   return `'${raw.replaceAll("'", "''")}'`
