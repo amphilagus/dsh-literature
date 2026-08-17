@@ -1,154 +1,169 @@
 # @amphilagus/dsh-literature
 
-An out-of-tree **DeepSeek Harness (dsh) bundle** for scientific-literature search, extracted from the
-keyanqu project's `literature_processor` backend (Crossref client semantics, paper/journal data model,
-SQLite storage) and rebuilt as a native TypeScript dsh plugin.
+DeepSeek Harness 的文献检索与定向跟踪包。标准编码 Agent 默认**看不到**这些工具；只有选中 **文献跟踪助理** preset 的会话才会启用。
 
-One function plugin provides three things:
+能做的事：
 
-- **搜索引擎 (`ctx.literature`)** — a merged search engine over the local SQLite full-text index
-  (FTS5) and the [Crossref REST API](https://api.crossref.org), deduplicated by DOI with local
-  records winning.
-- **搜索工具** — model-facing tools registered with the dsh tool registry:
-  - `literature_search` — keyword search (local + Crossref, year/journal/open-access/citation filters)
-  - `literature_get` — fetch one paper's full details by DOI (local cache first)
-- **数据库管理** — the local literature database plus its management tool:
-  - `literature_db` — `stats` / `search` / `get` / `import` / `delete` / `backup` / `export` / `vacuum`
-- **文献跟踪（literature tracking, schema v2）** — 定向跟踪主题/研究者的定期检索工作流:
-  - `tracking_plan_add` / `tracking_plan_list` / `tracking_plan_remove` — 文献跟踪方案表（topic 可配期刊 ISSN 白名单；person 必须 ORCID；每方向可配时间窗与排班周期）
-  - `tracking_search` — 同时检索 Crossref + arXiv，按方向时间窗 + 白名单过滤，命中全部缓存进老库，并做**第一轮自动筛查**（该方向新库已有的自动剔除）
-  - `tracking_curate` — 人工筛查后按唯一 ID（DOI 或 `arxiv:xxxx.xxxxx`）把老库文献转入**新库**（方向库），带符合度分级 very_high/high/medium/low 与备注；同方向去重、跨方向允许重复入藏
-  - `tracking_log_complete` — 填写搜索记录表（找到的相关文献 + 一句话介绍 + URL），**status=done 是每次搜索任务的完成终点**
-  - `tracking_curated_list` / `tracking_log_list` — 查看某方向新库 / 搜索记录
-- **运行时技能** — 不能自动化的判断写成了两个技能，供 agent 加载:
-  - `literature-tracking-setup` — 配置方向（白名单选刊、ORCID 查证、排班 schedule_create 建立）
-  - `literature-tracking-search` — 每次排班触发的执行 SOP（搜索 → 人工筛查分级 → 入库 → 填记录表 → 续约排班）
+- 用 Crossref + 本地 SQLite 搜论文，按 DOI 取详情
+- 跟踪一个研究主题（可配期刊 ISSN 白名单）或一个研究者（必须 ORCID）
+- 同时搜 Crossref 和 arXiv，自动去掉该方向已经入藏的文献，再人工筛查分级入库
+- 查自带的 SCI 期刊目录（约 9500 种刊：刊名、print ISSN / eISSN、影响因子、中科院分区），给白名单挑 ISSN
+- 用 DSH 的 schedule 做会话本地的定期提醒（到点跑一次跟踪搜索）
 
-## 排班提醒（schedule）
+不能做的事：不爬 PDF、不翻译全文、不替代日历闹钟或外部推送。提醒只在**当前会话进程还活着**时触发；关掉期间不响，再打开会补发逾期任务。
 
-提醒机制复用 DSH 自带的 `@deepseek-ai/dsh-schedule` 子系统（`schedule_create`/`schedule_list`/
-`schedule_delete` 工具）。它需要挂载进 profile（见下），否则到点不会自动发消息：
+## 两件东西，分别安装
 
-```sh
-dsh plugin --profile web add "link:/path/to/deepseek-harness/packages/schedule/schedule"
-# 并在 profile 的 cordis.patch.yml 里插入:
-#   - insert:
-#       - id: schedule
-#         name: '@deepseek-ai/dsh-schedule'
-```
+| 产物 | 是什么 | 装到哪 |
+|---|---|---|
+| **插件** `@amphilagus/dsh-literature` | host 平面 bundle：默认 `enabled: false`，不给任何会话注册工具 | 目标 profile（例如 `web`）的 `dsh.profile.bundles` |
+| **preset** `preset/` | agent 平面组合：人设 + 把文献插件以 `enabled: true` 挂上 + 挂上 schedule | `~/.dsh/.agent-presets/literature-tracking-assistant` |
 
-能力边界：提醒是**会话本地**机制——只有该会话进程存活时才到点触发，进程关闭期间不触发、
-重新打开后补发逾期任务；周期用固定间隔（`every_seconds`，最小 300 秒）而非日历语义；无外部
-推送渠道。排班由技能指导 agent 用 `schedule_create` 自建、任务完成后自续。
+只装插件、不装 preset：工具全部关闭，picker 里也没有「文献跟踪助理」。只装 preset、不装插件：preset 里的 `@amphilagus/dsh-literature` 行解析失败，会话起不来。
 
-## Database location
+**技能不用单独放置。** `literature-tracking-setup` 和 `literature-tracking-search` 是插件在 `enabled: true` 时用 `ctx.skills.register` 注册的运行时技能，不是 `~/.dsh/skills` 里的文件。不要把它们拷进 skills 目录。选中本 preset 后，agent 用自带的 `skill` 工具加载即可。
 
-By default the SQLite database lives at:
+## 部署
 
-```
-~/.dsh/data/literature/literature.db
-```
+下面默认 profile 名为 `web`，DSH home 为 `~/.dsh`（若设了 `DSH_HOME` 则换成那个目录）。web profile 关了 HMR，每一步装完都要重启 `dsh --profile web` 才生效。
 
-(`$DSH_HOME/data/literature/literature.db` when `DSH_HOME` is set.) The plugin creates the directory
-and schema on first load, and registers the directory as an extra sandbox **writable root** through
-`sandboxPolicy.grant`, so agents may also read/write database backups and exports there.
+### 1. 安装文献插件
 
-Schema: `papers` (DOI-keyed), `journals` (ISSN-keyed), `papers_fts` (FTS5 over title/abstract/
-journal/authors with sync triggers), a `meta` table carrying `schema_version`, and the v2 tracking
-tables `tracking_plans` / `curated_papers` / `search_logs`.
-
-## Package layout
-
-```
-dsh-literature/
-  cordis.patch.yml        # bundle patch: inserts the plugin row into a dsh profile
-  src/
-    index.ts              # plugin entry (name/inject/apply): ctx.literature, grant, tools
-    literature-service.ts # the ctx.literature Cordis service (db + engine)
-    db/                   # node:sqlite database manager (CRUD, FTS5, backup, import/export)
-    engine/               # Crossref client + merged search engine
-    tools/                # literature_search / literature_get / literature_db
-  tests/                  # db / engine / crossref / composition test suites
-  scripts/
-    link-dsh.sh           # symlink @deepseek-ai/* from the DSH checkout (dev)
-    install-profile.sh    # install/update this bundle into a dsh profile
-```
-
-## Install into a profile
-
-Requires the `dsh` CLI on `PATH`. The script forwards to `dsh plugin`, which links the package into
-the profile and reconciles `dsh.profile.bundles` automatically:
+先构建，再链进 profile：
 
 ```sh
 cd dsh-literature
+pnpm install
 pnpm run build
-./scripts/install-profile.sh web      # profile name defaults to "web"
+./scripts/install-profile.sh web
 ```
 
-or directly:
+或：
 
 ```sh
-dsh plugin --profile web add "link:/Users/amphilagusgu/workspace/keyanqu/dsh-literature"
+dsh plugin --profile web add "link:/绝对路径/dsh-literature"
 ```
 
-Restart the dsh process afterwards. To remove:
+这会把包写进 profile 的 `package.json`，并因本仓库声明了 `dsh.bundle.patch` 而加入 `dsh.profile.bundles`。host 上的那一行是空壳（`enabled: false`），标准 / PM / 浏览器等 preset 仍然没有文献工具。
+
+### 2. 安装 schedule（不是默认插件）
+
+`@deepseek-ai/dsh-schedule` **不在**默认 web 组合里，本仓库也不把它插到 host 上。它没有 `dsh.bundle.patch`，所以用 `dsh plugin add` 只会变成 profile 的普通依赖，供 preset **按包名解析**，不会让所有 Agent 都带上 `schedule_*`。
+
+从 DSH 源码树安装（本地 checkout）：
 
 ```sh
-dsh plugin --profile web remove @amphilagus/dsh-literature
+dsh plugin --profile web add "link:/绝对路径/deepseek-harness/packages/schedule/schedule"
 ```
 
-## Configuration
+若该包已发布到 npm，也可以：
 
-All fields are optional. Override them in the profile's own `cordis.patch.yml` (see the example at
-the top of `cordis.patch.yml`):
+```sh
+dsh plugin --profile web add @deepseek-ai/dsh-schedule
+```
 
-| Key | Default | Meaning |
-|---|---|---|
-| `dbPath` | `$DSH_HOME/data/literature/literature.db` | SQLite file (supports `~/...` paths) |
-| `mailto` | unset | Polite-pool email sent as the Crossref `mailto` parameter |
-| `crossrefBaseUrl` | `https://api.crossref.org/works` | Crossref works endpoint (tests can point at a stub) |
-| `arxivBaseUrl` | `https://export.arxiv.org/api/query` | arXiv export API endpoint |
-| `cacheRemote` | `true` | Store Crossref hits into the local database |
-| `remoteTimeoutMs` | `15000` | Per-request remote timeout |
+装完后 profile 的 `package.json` 里应有 `@deepseek-ai/dsh-schedule`，但 **`dsh.profile.bundles` 里不应出现它**，`cordis.patch.yml` 里也不应有 host 级：
 
 ```yaml
-# ~/.dsh/profiles/web/cordis.patch.yml
-- id: literature-search
-  config:
-    mailto: you@example.com
-    cacheRemote: true
+- insert:
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
 ```
 
-## Development
+若以前为了试验把上面这段写进了 `~/.dsh/profiles/web/cordis.patch.yml`，删掉。真正挂载 schedule 的是 preset 里这一行（已经写好，不用再抄）：
+
+```yaml
+# preset/agent.cordis.yml
+- id: schedule
+  name: '@deepseek-ai/dsh-schedule'
+```
+
+preset 的包名从 **host 的 node_modules** 解析，不从 preset 目录解析。只拷 preset、不执行这一步，选中文献跟踪助理时会因为找不到 `@deepseek-ai/dsh-schedule` 而挂载失败。
+
+### 3. 放置 preset
+
+目录名就是 preset id，必须是 `literature-tracking-assistant`：
 
 ```sh
-pnpm install            # installs typescript/tsdown/vitest
-bash scripts/link-dsh.sh  # symlink @deepseek-ai/* from the DSH checkout
-pnpm run typecheck      # tsc --noEmit
-pnpm run test           # vitest (db, crossref, engine, composition)
-pnpm run build          # tsdown -> lib/index.mjs + lib/index.d.mts
+mkdir -p ~/.dsh/.agent-presets
+cp -R preset ~/.dsh/.agent-presets/literature-tracking-assistant
 ```
 
-The composition suite mounts the plugin over `@deepseek-ai/dsh-agent-loop-testkit` and asserts the
-Loader-safe export shape, `ctx.literature`, all three tool registrations, tool execution, and the
-sandbox-policy grant. Crossref calls are stubbed in unit tests; the suite is hermetic (no network).
+应得到：
 
-## Relationship to the keyanqu backend
+```
+~/.dsh/.agent-presets/literature-tracking-assistant/preset.yml
+~/.dsh/.agent-presets/literature-tracking-assistant/agent.cordis.yml
+```
 
-The Crossref semantics (polite-pool `mailto`, retry/backoff, JATS abstract stripping, ISSN-type
-handling) and the papers/journals model were ported from
-`keyanqu/literature_processor/literature_processor/`. Translation/enhancement (selenium, haystack,
-celery) is intentionally out of scope for this plugin: agents get search + retrieval + a manageable
-database, not the crawler pipeline.
+`preset.yml` 只是 picker 上的显示名「文献跟踪助理」。改人设、mailto、是否挂 schedule，编辑的是 **拷过去之后** 的 `agent.cordis.yml`，不是仓库里的源文件（除非你改完再重新拷）。
 
-## Known limitations
+Web UI 的 agent-preset picker 应出现「文献跟踪助理」。已有会话不能中途换 preset，开一个**新会话**再选。
 
-- **Crossref rate limits** — Crossref is a shared polite pool; heavy use without a `mailto` may be
-  throttled. Configure `mailto`.
-- **CJK search** — FTS5 `unicode61` tokenizes CJK per character, so CJK queries take the substring
-  fallback path; results are substring matches rather than relevance-ranked.
-- **No full-text PDF access** — abstracts come from Crossref metadata; paywalled full texts are not
-  fetched.
-- **Schema migrations** — version 2 (v1 papers/journals + v2 tracking tables, all `CREATE TABLE IF
-  NOT EXISTS` so existing databases gain the new tables on open); future schema changes need
-  migration code added beside `SCHEMA_VERSION`.
+### 4. 重启并验收
+
+```sh
+dsh --profile web
+```
+
+1. 新建会话，选「文献跟踪助理」。
+2. 应能看到 `literature_search` / `literature_get` / `literature_db` / `tracking_*` / `schedule_create` / `schedule_list` / `schedule_delete`。
+3. `literature_db` 的 `action: journals` 按刊名、ISSN 或学科（如「物理」）能返回目录里的刊。
+4. `skill` 列表里应有 `literature-tracking-setup`、`literature-tracking-search`。
+5. 另开一个标准模式会话：上述文献工具和 schedule 工具都不应出现。
+
+## 数据落在哪
+
+首次在文献跟踪助理会话里启用插件后：
+
+```
+$DSH_HOME/data/literature/literature.db      # 论文库 + 跟踪方案 / 新库 / 搜索记录
+$DSH_HOME/data/literature/sci_journals.db    # 从本仓库 data/sci_journals.db 拷出的 SCI 目录
+```
+
+有 `sandboxPolicy.grant` 的 DSH 会把这个目录登记为额外可写根，bash/fs 才能碰 backup 和 export。没有 `grant` 的旧版 DSH 插件仍能加载，只是 shell 可能写不进去；文献工具本身不走 sandbox。
+
+## 常用配置
+
+文献插件配置写在 **preset 那次重新挂载** 上（host 空壳的 `enabled: false` 行改 mailto 不会传到本 agent）。编辑：
+
+`~/.dsh/.agent-presets/literature-tracking-assistant/agent.cordis.yml`
+
+```yaml
+- id: literature-search
+  name: '@amphilagus/dsh-literature'
+  config:
+    enabled: true
+    mailto: you@example.com    # Crossref polite pool，建议填
+    # dbPath: ~/custom/literature.db
+    # cacheRemote: true
+```
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `enabled` | host 上 `false`；本 preset 必须 `true` | 主开关 |
+| `mailto` | 空 | Crossref 礼貌池邮箱 |
+| `dbPath` | `$DSH_HOME/data/literature/literature.db` | 论文库路径 |
+| `cacheRemote` | `true` | 是否把远程命中写入本地库 |
+| `sciJournalsPath` | 包内 `data/sci_journals.db` | SCI 目录路径 |
+
+改完 preset 文件后新开的会话才会用新组合；已在跑的会话保持启动时那一版。
+
+## 跟踪怎么用
+
+1. 加载技能 `literature-tracking-setup`：定方向 → `literature_db` `journals` 挑 ISSN → `tracking_plan_add` → `schedule_create`。
+2. 提醒到期（或你手动要求跑一次）时加载 `literature-tracking-search`：`tracking_search` → 人工分级 → `tracking_curate` → `tracking_log_complete`（`status=done` 才算完成）→ 按周期再 `schedule_create`。
+
+`schedule_create` 的周期是 `every_seconds`（最小 300 秒），不是日历「每周一 9 点」。`prompt` 里写明要执行的方向名和技能名，否则到期后模型不知道该干什么。
+
+## 开发
+
+```sh
+pnpm install
+bash scripts/link-dsh.sh   # 把 DSH checkout 里的 @deepseek-ai/* 链到本包
+pnpm run typecheck
+pnpm run test
+pnpm run build
+```
+
+测试不访问网络。Crossref / arXiv 在单测里用 stub。
