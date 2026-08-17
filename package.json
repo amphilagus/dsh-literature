@@ -22,7 +22,8 @@
     "lib",
     "cordis.patch.yml",
     "data",
-    "preset"
+    "preset",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsdown",
