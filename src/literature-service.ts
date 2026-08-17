@@ -6,6 +6,7 @@
 
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { dshHomePath, expandHomePath } from '@deepseek-ai/dsh-home-paths'
+import { bundledSciJournalsPath, installSciJournalsCatalog, SciJournalCatalog } from './db/catalog.ts'
 import { LiteratureDatabase } from './db/database.ts'
 import { ArxivClient, DEFAULT_ARXIV_BASE_URL } from './engine/arxiv.ts'
 import { CrossrefClient, DEFAULT_CROSSREF_BASE_URL } from './engine/crossref.ts'
@@ -29,6 +30,8 @@ export interface LiteratureConfig {
   enabled?: boolean
   /** SQLite database path; default `$DSH_HOME/data/literature/literature.db`. */
   dbPath?: string
+  /** Bundled SCI journal catalog path; default `data/sci_journals.db` in this package. */
+  sciJournalsPath?: string
   /** Polite-pool email sent with every Crossref request. */
   mailto?: string
   /** Crossref works API base URL. */
@@ -52,6 +55,8 @@ export class LiteratureService extends Service {
   readonly arxiv: ArxivClient
   /** The literature-tracking dual-source engine (Crossref + arXiv). */
   readonly tracking: TrackingSearchEngine
+  /** Bundled SCI journal catalog (ISSN / eISSN, CAS partition, impact factor). */
+  readonly catalog: SciJournalCatalog
 
   constructor(ctx: Context, config: LiteratureConfig = {}) {
     super(ctx, 'literature')
@@ -78,7 +83,12 @@ export class LiteratureService extends Service {
       { cacheRemote: config.cacheRemote ?? true },
     )
     this.db.open()
+    const catalogSource = config.sciJournalsPath?.trim() || bundledSciJournalsPath()
+    const catalogPath = installSciJournalsCatalog(this.db.dataDir, catalogSource)
+    this.catalog = new SciJournalCatalog(catalogPath)
+    this.catalog.open()
     ctx.effect(() => () => {
+      this.catalog.close()
       this.db.close()
     })
   }

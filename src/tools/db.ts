@@ -12,6 +12,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { toHit } from '../engine/engine.ts'
 import type { PaperHit } from '../engine/types.ts'
 import type { PaperInput } from '../db/types.ts'
+import type { SciJournalHit } from '../db/catalog.ts'
 import type { LiteratureService } from '../literature-service.ts'
 import { renderJsonValue } from './render.ts'
 import { PAPER_SCHEMA } from './schemas.ts'
@@ -19,11 +20,10 @@ import { PAPER_SCHEMA } from './schemas.ts'
 export const LITERATURE_DB_TOOL_NAME = 'literature_db'
 
 const DB_DESCRIPTION =
-  'Manage the local literature database. Actions: stats (counts, size, year range), search (full-text '
-  + 'search over locally stored papers only), get (one stored paper by DOI), import (store a batch of '
-  + 'paper records), delete (remove one paper by DOI), backup (copy the database file), export (write '
-  + 'all records to a JSON file), vacuum (compact the database). Backup/export targets stay inside the '
-  + 'literature data directory.'
+  'Manage the local literature database and the bundled SCI journal catalog. Actions: stats, '
+  + 'search (local papers), journals (SCI catalog by title / ISSN / eISSN / CAS discipline), get, '
+  + 'import, delete, backup, export, vacuum. Use journals to pick ISSN values for a tracking-plan '
+  + 'whitelist. Backup/export targets stay inside the literature data directory.'
 
 const IMPORT_ITEM_SCHEMA = {
   type: 'object',
@@ -182,6 +182,35 @@ const DB_VACUUM_SCHEMA = {
   },
 } as const
 
+const DB_JOURNALS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', required: true, const: true },
+    action: { type: 'string', required: true, const: 'journals' },
+    query: { type: 'string', required: true },
+    total: { type: 'integer', required: true },
+    journals: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          title: { type: 'string', required: true },
+          issn: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+          eissn: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+          publisher: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+          impactFactor: { required: true, oneOf: [{ type: 'number' }, { type: 'null' }] },
+          casPartition: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
+          casDiscipline: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+          webOfScienceCategories: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+        },
+      },
+    },
+  },
+} as const
+
 const DB_ERROR_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -197,6 +226,7 @@ const DB_OUTPUT_SCHEMA = {
   oneOf: [
     DB_STATS_SCHEMA,
     DB_SEARCH_SCHEMA,
+    DB_JOURNALS_SCHEMA,
     DB_GET_SCHEMA,
     DB_IMPORT_SCHEMA,
     DB_DELETE_SCHEMA,
@@ -207,12 +237,13 @@ const DB_OUTPUT_SCHEMA = {
   ],
 } as const
 
-type DbAction = 'stats' | 'search' | 'get' | 'import' | 'delete' | 'backup' | 'export' | 'vacuum'
+type DbAction = 'stats' | 'search' | 'journals' | 'get' | 'import' | 'delete' | 'backup' | 'export' | 'vacuum'
 
 /** The exact canonical outcome union, mirroring {@link DB_OUTPUT_SCHEMA}. */
 type DbOutcome =
   | { ok: true; action: 'stats'; dbPath: string; sizeBytes: number; schemaVersion: number; paperCount: number; journalCount: number; earliestYear: number | null; latestYear: number | null }
   | { ok: true; action: 'search'; query: string; total: number; papers: PaperHit[] }
+  | { ok: true; action: 'journals'; query: string; total: number; journals: SciJournalHit[] }
   | { ok: true; action: 'get'; doi: string; paper: PaperHit | null }
   | { ok: true; action: 'import'; imported: number; skipped: number; failed: number; errors: string[] }
   | { ok: true; action: 'delete'; doi: string; deleted: boolean }
@@ -269,17 +300,20 @@ export function registerLiteratureDbTool(ctx: Context, service: LiteratureServic
       action: {
         type: 'string',
         required: true,
-        enum: ['stats', 'search', 'get', 'import', 'delete', 'backup', 'export', 'vacuum'],
+        enum: ['stats', 'search', 'journals', 'get', 'import', 'delete', 'backup', 'export', 'vacuum'],
         description: 'The management action to run.',
       },
-      query: { type: 'string', description: 'Search keywords; used by action "search".' },
+      query: {
+        type: 'string',
+        description: 'Search keywords. For action "search": local papers. For action "journals": journal title, print ISSN, eISSN, or CAS discipline.',
+      },
       doi: { type: 'string', description: 'Paper DOI; used by actions "get" and "delete".' },
       items: {
         type: 'array',
         description: 'Paper records to store; used by action "import".',
         items: IMPORT_ITEM_SCHEMA,
       },
-      limit: { type: 'integer', description: 'Maximum results for action "search", between 1 and 50. Defaults to 20.' },
+      limit: { type: 'integer', description: 'Maximum results for actions "search" and "journals", between 1 and 50. Defaults to 20.' },
       target: {
         type: 'string',
         description: 'File name for actions "backup"/"export", relative to the literature data directory. Defaults to a timestamped name.',
@@ -309,6 +343,15 @@ export function registerLiteratureDbTool(ctx: Context, service: LiteratureServic
               total: records.length,
               papers: records.map(record => toHit(record, 'local')),
             }
+          }
+          case 'journals': {
+            const limit = validateLimit(args.limit)
+            if (typeof limit !== 'number') {
+              return { ok: false, action, code: 'invalid_limit', message: limit }
+            }
+            const query = args.query?.trim() ?? ''
+            const journals = service.catalog.search({ query, limit })
+            return { ok: true, action: 'journals', query, total: journals.length, journals }
           }
           case 'get': {
             const doi = requireDoi(args.doi)

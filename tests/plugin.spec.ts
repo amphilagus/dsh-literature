@@ -115,6 +115,14 @@ describe('literature plugin', () => {
     ) as { ok: boolean; action: string; paperCount: number }
     expect(stats).toMatchObject({ ok: true, action: 'stats', paperCount: 1 })
 
+    const journals = await dbTool.execute(
+      { action: 'journals', query: '0168-583X' },
+      fakeExec({ name: 'literature_db' }),
+    ) as { ok: boolean; action: string; total: number; journals: { issn: string | null }[] }
+    expect(journals.ok).toBe(true)
+    expect(journals.total).toBeGreaterThan(0)
+    expect(journals.journals.some(journal => journal.issn === '0168-583X')).toBe(true)
+
     // DOI lookup failure mapping (not_found) is covered with stubs in
     // tests/engine.spec.ts; the composition suite stays hermetic (no network).
     await ctx.fiber.dispose()

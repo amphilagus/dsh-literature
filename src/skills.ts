@@ -21,10 +21,8 @@ export const SKILL_TRACKING_SETUP_CONTENT = `# 文献跟踪方向配置 (literat
 - **person（研究者）**：跟踪某研究者的新成果。**必须拿到 ORCID**。
 
 ### 2. 主题方向：配置期刊白名单
-- 白名单是 ISSN 字符串数组（print 或 eISSN 皆可），只对 Crossref 结果生效（arXiv 预印本不受期刊白名单限制）。
-- 期刊来源：
-  - 插件数据库 journals 表（可用 literature_db 查询）；或
-  - 用户提供的期刊数据库（如工作区 database/sci_journals.db，用 bash+python 查询）。
+- 白名单是 ISSN 字符串数组（print ISSN 或 eISSN 皆可；期刊用 ISSN，不是 ISBN），只对 Crossref 结果生效（arXiv 预印本不受期刊白名单限制）。
+- 期刊来源：用 literature_db action=journals，按学科（如"物理"、"材料科学"）、刊名或 ISSN 查插件自带的 SCI 期刊目录（含 print ISSN、eISSN、影响因子、中科院分区）。目录约 9500 种刊，按分区优先、影响因子从高到低排序。
 - 原则：只放该主题真正会发文章的期刊；宁可少而准，不要大而全。示例（快重离子辐照理论）：NIM-B 0168-583X / Radiation Physics and Chemistry 0969-806X / JAP 0021-8979 / PRB 2469-9969 / PRA 2469-9926 / Comput. Mater. Sci. 0927-0256 / J. Nucl. Mater. 0022-3115 / Matter Radiat. Extremes 2468-2047 / NST 1001-8042 等。
 - 不确定时先问用户要白名单，或提供候选列表请用户勾选。
 
