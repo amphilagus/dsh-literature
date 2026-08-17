@@ -46,39 +46,21 @@ dsh plugin --profile web add "link:/绝对路径/dsh-literature"
 
 这会把包写进 profile 的 `package.json`，并因本仓库声明了 `dsh.bundle.patch` 而加入 `dsh.profile.bundles`。host 上的那一行是空壳（`enabled: false`），标准 / PM / 浏览器等 preset 仍然没有文献工具。
 
-### 2. 安装 schedule（不是默认插件）
+### 2. 安装 schedule 包（仍须在 profile 的 node_modules 里）
 
-`@deepseek-ai/dsh-schedule` **不在**默认 web 组合里，本仓库也不把它插到 host 上。它没有 `dsh.bundle.patch`，所以用 `dsh plugin add` 只会变成 profile 的普通依赖，供 preset **按包名解析**，不会让所有 Agent 都带上 `schedule_*`。
-
-从 DSH 源码树安装（本地 checkout）：
+`@deepseek-ai/dsh-schedule` 不在默认 web 组合里。文献 bundle 会插入一行 `enabled: false` 的 schedule，preset 再以 `enabled: true` 重挂。包本身还是要装进 profile，否则那一行解析失败：
 
 ```sh
 dsh plugin --profile web add "link:/绝对路径/deepseek-harness/packages/schedule/schedule"
 ```
 
-若该包已发布到 npm，也可以：
+或：
 
 ```sh
 dsh plugin --profile web add @deepseek-ai/dsh-schedule
 ```
 
-装完后 profile 的 `package.json` 里应有 `@deepseek-ai/dsh-schedule`，但 **`dsh.profile.bundles` 里不应出现它**，`cordis.patch.yml` 里也不应有 host 级：
-
-```yaml
-- insert:
-    - id: schedule
-      name: '@deepseek-ai/dsh-schedule'
-```
-
-若以前为了试验把上面这段写进了 `~/.dsh/profiles/web/cordis.patch.yml`，删掉。真正挂载 schedule 的是 preset 里这一行（已经写好，不用再抄）：
-
-```yaml
-# preset/agent.cordis.yml
-- id: schedule
-  name: '@deepseek-ai/dsh-schedule'
-```
-
-preset 的包名从 **host 的 node_modules** 解析，不从 preset 目录解析。只拷 preset、不执行这一步，选中文献跟踪助理时会因为找不到 `@deepseek-ai/dsh-schedule` 而挂载失败。
+不要在 profile 的 `cordis.patch.yml` 里再单独 insert 一行 schedule。host 上的那一行已经由本仓库的 `cordis.patch.yml` 插入。
 
 ### 3. 放置 preset
 

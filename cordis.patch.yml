@@ -1,23 +1,20 @@
-# dsh-literature bundle patch: insert the scientific-literature search plugin.
-#
-# The plugin provides ctx.literature (search engine + database), registers the
-# model-facing tools literature_search / literature_get / literature_db, and
-# keeps its SQLite database at $DSH_HOME/data/literature/literature.db,
-# granted as an extra writable root through sandboxPolicy.
-#
-# Local deployment: literature/tracking tools are OFF by default. The
-# 文献跟踪助理 session preset remounts this plugin with `enabled: true`
-# (and mounts @deepseek-ai/dsh-schedule) so only that agent sees them.
+# dsh-literature bundle patch: insert the scientific-literature search plugin
+# and schedule. Both stay off on the host; the 文献跟踪助理 preset remounts
+# them with enabled: true.
 #
 # Per-user overrides belong in the profile's own cordis.patch.yml, addressed
 # by id:
 #   - id: literature-search
 #     config:
-#       mailto: you@example.com     # polite-pool email sent with Crossref requests
+#       mailto: you@example.com
 #       dbPath: /custom/literature.db
 #       cacheRemote: true
 - insert:
     - id: literature-search
       name: '@amphilagus/dsh-literature'
+      config:
+        enabled: false
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
       config:
         enabled: false
