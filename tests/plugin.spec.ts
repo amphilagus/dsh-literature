@@ -78,7 +78,7 @@ describe('literature plugin', () => {
     expect(ctx.tools.get('researcher_profile_disambiguate')).toBeDefined()
     expect(ctx.tools.get('researcher_profile_remove')).toBeDefined()
     expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(
-      expect.arrayContaining(['literature-tracking-setup', 'literature-tracking-search']),
+      expect.arrayContaining(['literature-tracking-setup', 'literature-tracking-search', 'literature-survey']),
     )
     await ctx.fiber.dispose()
   })
@@ -277,7 +277,7 @@ describe('literature plugin', () => {
     expect(ctx.tools.get('literature_search')).toBeUndefined()
     expect(ctx.tools.get('tracking_search')).toBeUndefined()
     expect((await ctx.skills.list()).map(skill => skill.name)).not.toEqual(
-      expect.arrayContaining(['literature-tracking-setup', 'literature-tracking-search']),
+      expect.arrayContaining(['literature-tracking-setup', 'literature-tracking-search', 'literature-survey']),
     )
     await ctx.fiber.dispose()
   })

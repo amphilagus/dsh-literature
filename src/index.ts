@@ -22,7 +22,7 @@ import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { LiteratureService } from './literature-service.ts'
 import type { LiteratureConfig } from './literature-service.ts'
-import { SKILL_TRACKING_SEARCH, SKILL_TRACKING_SEARCH_CONTENT, SKILL_TRACKING_SETUP, SKILL_TRACKING_SETUP_CONTENT } from './skills.ts'
+import { SKILL_SURVEY, SKILL_SURVEY_CONTENT, SKILL_TRACKING_SEARCH, SKILL_TRACKING_SEARCH_CONTENT, SKILL_TRACKING_SETUP, SKILL_TRACKING_SETUP_CONTENT } from './skills.ts'
 import { registerLiteratureDbTool } from './tools/db.ts'
 import { registerLiteratureGetTool } from './tools/get.ts'
 import { registerResearcherTools } from './tools/researcher.ts'
@@ -51,7 +51,7 @@ export { registerLiteratureGetTool, LITERATURE_GET_TOOL_NAME } from './tools/get
 export { registerLiteratureSearchTool, LITERATURE_SEARCH_TOOL_NAME } from './tools/search.ts'
 export { registerTrackingTools, TRACKING_CURATE_TOOL_NAME, TRACKING_CURATED_LIST_TOOL_NAME, TRACKING_LOG_COMPLETE_TOOL_NAME, TRACKING_LOG_LIST_TOOL_NAME, TRACKING_PLAN_ADD_TOOL_NAME, TRACKING_PLAN_LIST_TOOL_NAME, TRACKING_PLAN_REMOVE_TOOL_NAME, TRACKING_SEARCH_TOOL_NAME } from './tools/tracking.ts'
 export { registerResearcherTools, RESEARCHER_PROFILE_DISAMBIGUATE_TOOL_NAME, RESEARCHER_PROFILE_QUERY_TOOL_NAME, RESEARCHER_PROFILE_REMOVE_TOOL_NAME, RESEARCHER_PROFILE_UPSERT_TOOL_NAME } from './tools/researcher.ts'
-export { SKILL_TRACKING_SEARCH, SKILL_TRACKING_SETUP } from './skills.ts'
+export { SKILL_SURVEY, SKILL_TRACKING_SEARCH, SKILL_TRACKING_SETUP } from './skills.ts'
 
 /** Cordis function-plugin name. */
 export const name = 'literature-search'
@@ -86,19 +86,15 @@ function tryGrantLiteratureDataRoot(ctx: Context, dataDir: string): void {
 }
 
 const TOOL_GUIDANCE =
-  'Use literature_search to find scientific papers on a research topic (it merges the local literature '
-  + 'database with Crossref), literature_get to fetch one paper\'s full details by DOI, and literature_db '
-  + 'to inspect or manage the local literature database (stats, import, backup, export) and the bundled '
-  + 'SCI journal catalog (action journals: look up title / print ISSN / eISSN / CAS discipline). Prefer a local '
-  + 'literature_db search for papers already stored, and remember that remote Crossref calls are '
-  + 'rate-limited and polite-pool shared. '
-  + 'For the literature-tracking workflow use tracking_plan_add/list/remove (跟踪方案表), tracking_search '
-  + '(Crossref + arXiv windowed search with first-pass dedupe), tracking_curate (curate into a direction '
-  + 'library), tracking_log_complete (fill the search log — the run\'s completion endpoint), and '
-  + 'tracking_curated_list/tracking_log_list to inspect. For persistent researcher identity use '
-  + 'researcher_profile_disambiguate, researcher_profile_upsert, researcher_profile_query, and '
-  + 'researcher_profile_remove (档案跨会话存活; 建 person 方向前先消歧并建档). Load the literature-tracking-setup or '
-  + 'literature-tracking-search skill before configuring directions or running a scheduled search.'
+  'Use literature_search (local + Crossref), literature_get (DOI), and literature_db '
+  + '(stats/import/backup and SCI journals by title/ISSN/CAS). Prefer a local search for papers already stored; '
+  + 'remote Crossref is rate-limited. '
+  + 'Tracking: tracking_plan_add/list/remove, tracking_search, tracking_curate, tracking_log_complete, '
+  + 'tracking_curated_list, tracking_log_list. '
+  + 'Researcher identity: researcher_profile_disambiguate, researcher_profile_upsert, '
+  + 'researcher_profile_query, researcher_profile_remove (档案跨会话存活; 建 person 方向前先消歧并建档). '
+  + 'Load literature-survey for a one-off topic survey, literature-tracking-setup before configuring a direction, '
+  + 'and literature-tracking-search before a scheduled tracking run.'
 
 /**
  * Mount the literature service, optional sandbox extra-root grant, tools,
@@ -141,6 +137,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     description: 'Run a scheduled literature-tracking search: dual-source search, manual relevance screening, curation, and closing the search log.',
     source: 'runtime',
     content: SKILL_TRACKING_SEARCH_CONTENT,
+  })
+  ctx.skills.register({
+    name: SKILL_SURVEY,
+    description: 'One-off literature survey of a topic or author: local + Crossref search and a relevance-ranked digest. Not a tracking plan.',
+    source: 'runtime',
+    content: SKILL_SURVEY_CONTENT,
   })
 
   ctx.systemPrompt.section({
