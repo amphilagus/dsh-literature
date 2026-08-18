@@ -130,6 +130,12 @@ export class TrackingSearchEngine {
         const page = await this.crossref.searchWorks({
           query: plan.name,
           rows: 100,
+          // Retrieval net for topic directions: only works registered with
+          // Crossref since the window start, ranked by relevance and cropped
+          // to the plan window below. Plain relevance ranking buries recent
+          // papers under all-time classics, so a created-date net is required
+          // (published dates are polluted; same net as literature_search).
+          filter: `from-created-date:${windowStart},type:journal-article`,
           sort: 'relevance',
         }, signal)
         for (const work of page.works) {

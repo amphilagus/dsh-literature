@@ -151,9 +151,10 @@ const emptyArxiv: ArxivSearchApi = {
 }
 
 describe('tracking Crossref search paths', () => {
-  it('uses relevance and crops topic hits locally without a Crossref date filter', async () => {
+  it('uses a created-date retrieval net plus relevance and crops topic hits locally', async () => {
     const today = new Date().toISOString().slice(0, 10)
     const [year, month, day] = today.split('-').map(Number)
+    const windowStart = new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10)
     let captured: SearchWorksParams | undefined
     const crossref: CrossrefSearchApi = {
       async searchWorks(params) {
@@ -177,7 +178,7 @@ describe('tracking Crossref search paths', () => {
     const engine = new TrackingSearchEngine(db, crossref, emptyArxiv, { cacheRemote: false })
     const outcome = await engine.searchPlan(plan)
     expect(captured?.sort).toBe('relevance')
-    expect(captured?.filter).toBeUndefined()
+    expect(captured?.filter).toBe(`from-created-date:${windowStart},type:journal-article`)
     expect(outcome.candidates.map(candidate => candidate.unique_id)).toEqual(['10.1000/new'])
     db.close()
   })
